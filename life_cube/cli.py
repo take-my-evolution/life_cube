@@ -1,53 +1,90 @@
 """Командная строка.
 
-    life-cube                                # 128^3, 200 поколений, CPU
-    life-cube --n 256 --gens 800 --gpu       # CuPy на GPU
-    life-cube --n 64 --gens 120 --no-render
-    python -m life_cube ...                  # то же самое
+    life-cube run  [--n 128 --gens 200 --gpu --out x.png --save-state x.npz]
+    life-cube serve [--n 128 --gpu --port 8765 --rate 10]   # живой веб-просмотр
+    python -m life_cube ...                                  # то же самое
+
+Без подкоманды работает как `run` (обратная совместимость).
 """
 
 import argparse
+import sys
 
 from .config import Config
 from .sim import run, save_state
+
+
+def _common(p):
+    p.add_argument("--n", type=int, default=128, help="размер куба")
+    p.add_argument("--seed-world", type=int, default=20260825)
+    p.add_argument("--seed-mut", type=int, default=20260825)
+    p.add_argument("--gpu", action="store_true", help="считать на CuPy")
+    p.add_argument("--seed-density", type=float, default=None)
 
 
 def build_parser():
     p = argparse.ArgumentParser(
         prog="life-cube",
         description="3D клеточный автомат с экологией: камень, свет, вода, виды")
-    p.add_argument("--n", type=int, default=128, help="размер куба")
-    p.add_argument("--gens", type=int, default=200, help="число поколений")
-    p.add_argument("--seed-world", type=int, default=20260825)
-    p.add_argument("--seed-mut", type=int, default=20260825)
-    p.add_argument("--gpu", action="store_true", help="считать на CuPy")
-    p.add_argument("--no-render", action="store_true")
-    p.add_argument("--out", default="cube_ecology.png")
-    p.add_argument("--save-state", default=None, help="путь для .npz со снимком")
-    p.add_argument("--quiet", action="store_true")
+    sub = p.add_subparsers(dest="mode")
+
+    r = sub.add_parser("run", help="прогон с картинкой в конце")
+    _common(r)
+    r.add_argument("--gens", type=int, default=200, help="число поколений")
+    r.add_argument("--no-render", action="store_true")
+    r.add_argument("--out", default="cube_ecology.png")
+    r.add_argument("--save-state", default=None, help="путь для .npz со снимком")
+    r.add_argument("--quiet", action="store_true")
+
+    s = sub.add_parser("serve", help="веб-просмотр: http://host:port/")
+    _common(s)
+    s.add_argument("--host", default="0.0.0.0")
+    s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--rate", type=float, default=10.0,
+                   help="целевых поколений/с (0 = без предела)")
+    s.add_argument("--snapshot-every", type=int, default=1,
+                   help="слать снимок каждое k-е поколение")
+    s.add_argument("--no-components", action="store_true",
+                   help="не считать организмы (быстрее)")
+    s.add_argument("--paused", action="store_true", help="стартовать на паузе")
     return p
 
 
+def _cfg(a, **kw):
+    extra = {}
+    if getattr(a, "seed_density", None) is not None:
+        extra["seed_density"] = a.seed_density
+    return Config(n=a.n, seed_world=a.seed_world, seed_mut=a.seed_mut, **extra, **kw)
+
+
 def main(argv=None):
-    """Точка входа console_script: должна возвращать код выхода, не результат."""
+    """Точка входа console_script: возвращает код выхода, не результат."""
     run_cli(argv)
     return 0
 
 
 def run_cli(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0].startswith("-"):
+        argv = ["run"] + argv
     a = build_parser().parse_args(argv)
-    cfg = Config(n=a.n, gens=a.gens,
-                 seed_world=a.seed_world, seed_mut=a.seed_mut)
-    res = run(cfg, use_gpu=a.gpu, verbose=not a.quiet)
 
+    if a.mode == "serve":
+        from .viewers.web import serve
+        serve(_cfg(a), use_gpu=a.gpu, host=a.host, port=a.port, rate=a.rate,
+              snapshot_every=a.snapshot_every, components=not a.no_components,
+              autostart=not a.paused)
+        return None
+
+    cfg = _cfg(a, gens=a.gens)
+    res = run(cfg, use_gpu=a.gpu, verbose=not a.quiet)
     if a.save_state:
         print("состояние:", save_state(res, a.save_state))
-
     if not a.no_render:
-        from .render import render
+        from .viewers.matplotlib import render
         print("картинка:", render(res, a.out))
     return res
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

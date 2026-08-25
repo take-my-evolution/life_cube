@@ -13,8 +13,9 @@ dependencies = ["numpy>=1.24", "scipy>=1.10"]
 
 [project.optional-dependencies]
 render = ["matplotlib>=3.7"]
-gpu = ["cupy-cuda12x"]
-dev = ["pytest>=7", "matplotlib>=3.7"]
+gpu = ["cupy-cuda12x[ctk]"]
+web = ["aiohttp>=3.9"]
+dev = ["pytest>=7", "matplotlib>=3.7", "aiohttp>=3.9", "playwright>=1.40"]
 
 [project.scripts]
 life-cube = "life_cube.cli:main"
@@ -24,3 +25,6 @@ include = ["life_cube*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+"life_cube.viewers.web" = ["static/*"]
