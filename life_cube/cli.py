@@ -29,6 +29,12 @@ def build_parser():
 
 
 def main(argv=None):
+    """Точка входа console_script: должна возвращать код выхода, не результат."""
+    run_cli(argv)
+    return 0
+
+
+def run_cli(argv=None):
     a = build_parser().parse_args(argv)
     cfg = Config(n=a.n, gens=a.gens,
                  seed_world=a.seed_world, seed_mut=a.seed_mut)
