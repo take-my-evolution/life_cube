@@ -51,6 +51,8 @@ def build_parser():
     s.add_argument("--fps", type=float, default=25.0, help="предел кадров/с для зрителей")
     s.add_argument("--components-hz", type=float, default=2.0,
                    help="как часто пересчитывать организмы (дорого)")
+    s.add_argument("--yield-ms", type=float, default=0.5,
+                   help="сколько мс уступать веб-серверу на каждом шаге при rate=0")
     s.add_argument("--no-components", action="store_true",
                    help="не считать организмы (быстрее)")
     s.add_argument("--paused", action="store_true", help="стартовать на паузе")
@@ -80,7 +82,7 @@ def run_cli(argv=None):
         from .viewers.web import serve
         serve(_cfg(a), use_gpu=a.gpu, host=a.host, port=a.port, rate=a.rate,
               snapshot_every=a.snapshot_every, components=not a.no_components,
-              autostart=not a.paused, fps=a.fps, components_hz=a.components_hz)
+              autostart=not a.paused, fps=a.fps, components_hz=a.components_hz, yield_ms=a.yield_ms)
         return None
 
     cfg = _cfg(a, gens=a.gens)

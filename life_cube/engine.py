@@ -17,12 +17,15 @@ from .step import step
 
 class Engine:
     def __init__(self, cfg: Config, use_gpu=False, rate=10.0,
-                 snapshot_every=1, components=True):
+                 snapshot_every=1, components=True, yield_ms=0.5):
         self.cfg = cfg
         self.xp, self.correlate, self.on_gpu = get_backend(use_gpu)
         self.state, self.relief = init_state(cfg, self.xp)
         self.gen = 0
         self.rate = float(rate)          # целевых поколений/с; <=0 — без предела
+        # без предела скорости поток симуляции не отдаёт GIL и душит веб-сервер:
+        # уступаем ему немного времени на каждом шаге
+        self.yield_ms = float(yield_ms)
         self.snapshot_every = int(snapshot_every)
         self.components = components
         self.tracker = Tracker() if components else None
@@ -135,6 +138,8 @@ class Engine:
                     if budget > 0:
                         self._wake.wait(budget)
                         self._wake.clear()
+                elif self.yield_ms > 0:
+                    time.sleep(self.yield_ms / 1000.0)
         finally:
             self.running = False
 

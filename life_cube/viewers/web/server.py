@@ -189,11 +189,12 @@ class WebViewer:
 
 def serve(cfg: Config, use_gpu=False, host="0.0.0.0", port=8765, rate=0.0,
           snapshot_every=0, components=True, autostart=True, fps=25.0,
-          components_hz=2.0):
+          components_hz=2.0, yield_ms=0.5):
     """Поднять движок в фоновом потоке и веб-сервер в текущем."""
     from aiohttp import web
     engine = Engine(cfg, use_gpu=use_gpu, rate=rate,
-                    snapshot_every=snapshot_every, components=components)
+                    snapshot_every=snapshot_every, components=components,
+                    yield_ms=yield_ms)
     if not autostart:
         engine.pause()
     viewer = WebViewer(engine, fps=fps, components_hz=components_hz)
