@@ -206,3 +206,35 @@ def test_world_panel_reseeds(page, server):
     assert e.gen <= 3          # мир пересоздан, счётчик сброшен
     stone_share = float((e.state["stone"]).mean())
     assert 0.4 < stone_share < 0.6, stone_share
+
+
+def test_server_stays_alive_during_heavy_reseed(page, server):
+    """Регрессия на зависание: пересев большого мира не должен блокировать
+    сервер. Раньше команда исполнялась в цикле событий, и страница умирала."""
+    import time as _t
+    import urllib.request
+    url = server["url"]
+    page.evaluate("viewer.CFG.world.n = 128; viewer.CFG.world.seed_density = 0.02")
+    page.click("#btnApplyWorld")
+    # сразу после команды сервер обязан отвечать по HTTP
+    ok, t0 = 0, _t.time()
+    for _ in range(6):
+        started = _t.time()
+        with urllib.request.urlopen(url, timeout=3) as r:
+            assert r.status == 200
+        ok += 1
+        assert _t.time() - started < 3
+        _t.sleep(0.2)
+    assert ok == 6
+    page.wait_for_function("viewer.S.n == 128", timeout=25000)
+    assert server["engine"].cfg.n == 128
+
+
+def test_oversized_world_is_refused_with_message(page, server):
+    n_before = server["engine"].cfg.n
+    page.evaluate("viewer.CFG.world.n = 4096")
+    page.click("#btnApplyWorld")
+    page.wait_for_function("document.getElementById('status').textContent.includes('ошибка')", timeout=8000)
+    assert server["engine"].cfg.n == n_before
+    txt = page.inner_text("#status")
+    assert "предел" in txt

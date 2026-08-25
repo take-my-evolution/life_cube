@@ -38,6 +38,9 @@ def encode_snapshot(snap: Snapshot, first=False, sound=None) -> bytes:
         "rate": getattr(snap, "rate", 0.0),
         "measured_rate": round(getattr(snap, "measured_rate", 0.0), 2),
         "paused": getattr(snap, "paused", False),
+        "stride": getattr(snap, "stride", 1),
+        "components_on": getattr(snap, "components_on", True),
+        "snapshot_ms": round(getattr(snap, "snapshot_seconds", 0.0) * 1000),
         "components": [[c.cid, c.species, c.size, *c.center, c.zmin, c.zmax, c.born]
                        for c in snap.components],
         "hist_tail": [list(map(int, h)) for h in getattr(snap, "hist", [])[-400:]],
@@ -71,8 +74,11 @@ def decode_snapshot(buf: bytes):
 
 
 class WebViewer:
-    def __init__(self, engine: Engine, fps=25.0, components_hz=2.0):
+    MAX_N = 256          # выше этого куб не даём создать из браузера
+
+    def __init__(self, engine: Engine, fps=25.0, components_hz=2.0, max_n=256):
         self.engine = engine
+        self.MAX_N = int(max_n)
         self.fps = fps                 # верхний предел снимков в секунду
         self.components_hz = components_hz   # как часто пересчитывать организмы
         self.loop = None
@@ -103,15 +109,22 @@ class WebViewer:
         tick = 0
         while True:
             if pull:
-                await asyncio.sleep(1.0 / self.fps)
-                if not self.clients or self.engine.gen == last_gen:
+                # если прошлый снимок был долгим, снимаем реже: иначе очередь
+                # снимков забивает и симуляцию, и сервер (так вешался большой куб)
+                slow = self.engine.snapshot_seconds
+                await asyncio.sleep(max(1.0 / self.fps, min(slow * 1.5, 5.0)))
+                if not self.clients or self.engine.gen == last_gen or self.engine.busy:
                     continue
                 last_gen = self.engine.gen
                 tick += 1
                 # разметка организмов дороже самой геометрии — делаем её реже
                 comps = (tick % every == 0)
-                await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: self.engine.publish(force=True, components=comps))
+                self.engine.busy = True
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: self.engine.publish(force=True, components=comps))
+                finally:
+                    self.engine.busy = False
             else:
                 await self._new.wait()
                 self._new.clear()
@@ -141,8 +154,17 @@ class WebViewer:
                 if msg.type != WSMsgType.TEXT:
                     continue
                 try:
-                    self.handle(json.loads(msg.data))
-                except Exception as e:      # плохая команда не роняет сервер
+                    cmd = json.loads(msg.data)
+                except Exception as e:
+                    await ws.send_str(json.dumps({"error": f"не разобрал команду: {e}"}))
+                    continue
+                # ВАЖНО: команды исполняем в отдельном потоке. Пересев большого
+                # мира занимает секунды, и в цикле сервера он вешал ВСЁ — ни
+                # страница, ни другие клиенты не отвечали (наступали).
+                try:
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, self.handle, cmd)
+                except Exception as e:
                     await ws.send_str(json.dumps({"error": str(e)}))
         finally:
             self.clients.discard(ws)
@@ -175,6 +197,12 @@ class WebViewer:
             self._push_config()
         elif c == "world":
             params = dict(cmd.get("value") or {})
+            n = int(params.get("n", e.cfg.n))
+            if n > self.MAX_N:
+                raise ValueError(f"куб {n}³ не поднять: предел {self.MAX_N}³ "
+                                 f"(память и скорость). Уменьши размер.")
+            if n < 16:
+                raise ValueError("куб меньше 16³ бессмысленен")
             reseed = bool(cmd.get("reseed", True))
             e.set_world(**params)
             if reseed:
@@ -219,15 +247,15 @@ class WebViewer:
 
 def serve(cfg: Config, use_gpu=False, host="0.0.0.0", port=8765, rate=0.0,
           snapshot_every=0, components=True, autostart=True, fps=25.0,
-          components_hz=2.0, yield_ms=0.5):
+          components_hz=2.0, yield_ms=0.5, max_n=256, max_cells=400_000):
     """Поднять движок в фоновом потоке и веб-сервер в текущем."""
     from aiohttp import web
     engine = Engine(cfg, use_gpu=use_gpu, rate=rate,
                     snapshot_every=snapshot_every, components=components,
-                    yield_ms=yield_ms)
+                    yield_ms=yield_ms, max_cells=max_cells)
     if not autostart:
         engine.pause()
-    viewer = WebViewer(engine, fps=fps, components_hz=components_hz)
+    viewer = WebViewer(engine, fps=fps, components_hz=components_hz, max_n=max_n)
     th = threading.Thread(target=engine.run, daemon=True, name="life-cube-sim")
     th.start()
     print(f"life-cube web viewer: http://{host}:{port}/  "

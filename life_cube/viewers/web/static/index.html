@@ -291,8 +291,9 @@ function draw(){
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, instCount);
   }
   S.frames++;
-  $('hud').textContent = `поколение ${S.gen}   живых ${S.k}   ${S.paused?'ПАУЗА':(S.measured.toFixed(1)+' пок/с')}` +
-    `\nвиды ${S.pops.join(' / ')}   организмов ${S.comps.length}${S.selected?'   выделен #'+S.selected:''}`;
+  const extra = (S.stride>1?`   показана 1/${S.stride} клеток`:'') + (S.componentsOn===false?'   организмы не считаются (большой мир)':'');
+  $('hud').textContent = `поколение ${S.gen}   живых ${S.k}${S.stride>1?'×'+S.stride:''}   ${S.paused?'ПАУЗА':(S.measured.toFixed(1)+' пок/с')}   кадр ${S.snapshotMs||0} мс` +
+    `\nвиды ${S.pops.join(' / ')}   организмов ${S.comps.length}${S.selected?'   выделен #'+S.selected:''}${extra}`;
 }
 function loop(){ if (dirty){ dirty=false; draw(); } requestAnimationFrame(loop); }
 requestAnimationFrame(loop);
@@ -354,6 +355,7 @@ function applyFrame(buf){
   S.soil=new Uint16Array(buf.slice(off, off+m*6));
   S.gen=hdr.gen; S.k=k; S.pops=hdr.pops; S.comps=hdr.components; S.hist=hdr.hist_tail;
   S.paused=hdr.paused; S.rate=hdr.rate; S.measured=hdr.measured_rate;
+  S.stride=hdr.stride||1; S.componentsOn=hdr.components_on!==false; S.snapshotMs=hdr.snapshot_ms||0;
   if (hdr.relief){ S.relief=hdr.relief; }
   if (hdr.species_names) { S.names=hdr.species_names; S.nsp=hdr.species_names.length; buildSpeciesBox(); }
   if (hdr.config) applyConfig(hdr.config);
@@ -371,7 +373,7 @@ function connect(){
   ws=new WebSocket(url); ws.binaryType='arraybuffer';
   ws.onmessage=e=>{ if (typeof e.data==='string'){
       try { const m=JSON.parse(e.data); if (m.config){ applyConfig(m.config); $('status').textContent='конфиг обновлён'; return; }
-            if (m.error){ $('status').textContent='ошибка: '+m.error; return; } } catch(err){}
+            if (m.error){ $('status').textContent='ошибка: '+m.error; $('status').style.color='#f2683c'; return; } } catch(err){}
       $('status').textContent=e.data; return; }
     applyFrame(e.data); };
   ws.onopen=()=>{ $('status').textContent='подключено'; };
@@ -415,7 +417,7 @@ const WORLD_LABELS = { n:'размер куба (нужен пересоздан
   seed_density:'плотность засева', animal_share:'доля животных в засеве', stone_fraction:'доля камня по высоте',
   relief_amp:'размах рельефа', p_shock:'выветривание', p_dissolve:'растворение камня',
   plant_energy:'энергия клетки растения', eat_efficiency:'усвоение добычи', move_noise:'шум в движении' };
-const WORLD_RANGES = { n:[32,320,32], seed_density:[0.001,0.05,0.001], animal_share:[0,0.9,0.02],
+const WORLD_RANGES = { n:[32,256,32], seed_density:[0.001,0.05,0.001], animal_share:[0,0.9,0.02],
   stone_fraction:[0.05,0.7,0.01], relief_amp:[0,1.2,0.05], p_shock:[0,0.02,0.0002], p_dissolve:[0,0.02,0.0002],
   plant_energy:[0.1,5,0.1], eat_efficiency:[0.1,1,0.05], move_noise:[0,1,0.05] };
 function worldControls(){
@@ -447,7 +449,7 @@ function applyConfig(cfg){
 }
 $('btnApplyGenes').onclick=()=>send({cmd:'genomes', value:CFG.edited});
 $('btnResetGenes').onclick=()=>{ CFG.edited=JSON.parse(JSON.stringify(CFG.initial)); geneSliders(); send({cmd:'genomes', value:CFG.edited}); };
-$('btnApplyWorld').onclick=()=>send({cmd:'world', value:CFG.world, reseed:true});
+$('btnApplyWorld').onclick=()=>{ $('status').style.color=''; $('status').textContent='пересоздаю мир…'; send({cmd:'world', value:CFG.world, reseed:true}); };
 $('btnRandomSeed').onclick=()=>{ CFG.world.seed_world=Math.floor(Math.random()*1e9); CFG.world.seed_mut=Math.floor(Math.random()*1e9);
   worldControls(); send({cmd:'world', value:CFG.world, reseed:true}); };
 $('btnExport').onclick=async()=>{ const t=JSON.stringify({genomes:CFG.edited, world:CFG.world});

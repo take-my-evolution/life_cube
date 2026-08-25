@@ -16,8 +16,13 @@ from .step import step
 
 
 class Engine:
+    # выше этого числа клеток разметка организмов (scipy.label на CPU) стоит
+    # секунды и душит и симуляцию, и веб-сервер: отключаем её автоматически
+    COMPONENTS_CELL_LIMIT = 6_000_000
+
     def __init__(self, cfg: Config, use_gpu=False, rate=10.0,
-                 snapshot_every=1, components=True, yield_ms=0.5):
+                 snapshot_every=1, components=True, yield_ms=0.5,
+                 max_cells=400_000):
         self.cfg = cfg
         self.xp, self.correlate, self.on_gpu = get_backend(use_gpu)
         self.state, self.relief = init_state(cfg, self.xp)
@@ -38,6 +43,9 @@ class Engine:
         self._wake = threading.Event()
         self.last_snapshot = None
         self.measured_rate = 0.0
+        self.max_cells = int(max_cells)     # столько живых клеток шлём зрителю
+        self.snapshot_seconds = 0.0         # сколько занял последний снимок
+        self.busy = False                   # снимок уже считается
         self.publish(force=True)
 
     # --- управление ---------------------------------------------------------
@@ -86,6 +94,14 @@ class Engine:
         with self._lock:
             if cfg is not None:
                 self.cfg = cfg
+            # освобождаем видеопамять прошлого мира до создания нового,
+            # иначе на больших кубах два мира не влезают
+            self.state = None
+            if self.on_gpu:
+                try:
+                    self.xp.get_default_memory_pool().free_all_blocks()
+                except Exception:
+                    pass
             self.state, self.relief = init_state(self.cfg, self.xp)
             self.gen = 0
             self.hist = []
@@ -100,19 +116,22 @@ class Engine:
             self.hist.append(pops)
         return pops
 
-    def publish(self, force=False, components=None):
+    def publish(self, force=False, components=None):  # noqa: C901
         """Снимок текущего состояния. snapshot_every=0 — из цикла не зовётся,
         снимки делает наблюдатель в своём темпе (см. viewers/web)."""
         if not force and (self.snapshot_every <= 0 or self.gen % self.snapshot_every):
             return None
         # копируем массивы под замком (быстро), тяжёлую разметку делаем без него,
         # чтобы симуляция не ждала CPU
+        t_start = time.perf_counter()
         with self._lock:
             gen = self.gen
             cpu = {"species": to_cpu(self.state["species"]).copy(),
                    "soil": to_cpu(self.state["soil"]).copy()}
             hist = list(self.hist)
         want = self.components if components is None else (components and self.components)
+        if want and self.cfg.n ** 3 > self.COMPONENTS_CELL_LIMIT:
+            want = False                    # слишком большой мир — без разметки
         snap = make_snapshot(cpu, gen, self.cfg, self.tracker,
                              with_components=want)
         if not want and self.last_snapshot is not None:
@@ -120,10 +139,22 @@ class Engine:
             snap.components = self.last_snapshot.components
         snap.relief = self.relief
         snap.hist = hist
+        # для показа прореживаем: миллион кубиков браузеру всё равно не нужен
+        k = len(snap.coords)
+        if self.max_cells and k > self.max_cells:
+            stride = int(k // self.max_cells) + 1
+            snap.coords = snap.coords[::stride]
+            snap.species = snap.species[::stride]
+            snap.labels = snap.labels[::stride]
+            snap.stride = stride
+        else:
+            snap.stride = 1
         snap.rate = self.rate
         snap.measured_rate = self.measured_rate
         snap.paused = self.paused
+        snap.components_on = want
         self.last_snapshot = snap
+        self.snapshot_seconds = time.perf_counter() - t_start
         for fn in self.listeners:
             fn(snap)
         return snap
