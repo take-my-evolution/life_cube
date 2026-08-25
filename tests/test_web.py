@@ -137,3 +137,28 @@ def test_controls_reach_engine(page, server):
     page.click("#btnPause")          # -> pause
     time.sleep(0.3)
     g = e.gen; time.sleep(0.3); assert e.gen == g
+
+
+def test_sound_frame_reaches_client_and_audio_graph(page, server):
+    gen = server["engine"].gen
+    page.wait_for_function(f"viewer.S.gen == {gen}", timeout=10000)
+    sf = page.evaluate("viewer.S.sound")
+    assert sf and len(sf["harmonics"]) == 64 and sf["gen"] == gen
+    assert max(sf["harmonics"]) > 0
+    # включаем звук (в headless контекст может быть suspended — граф всё равно строится)
+    page.click("#btnAudio")
+    st = page.evaluate("({on: viewer.Audio.on, harm: viewer.Audio.harm.length, voices: viewer.Audio.voices.size, state: viewer.Audio.ctx.state})")
+    assert st["on"] and st["harm"] == 64 and st["voices"] == len(sf["voices"])
+    # гармоники с населением получили ненулевой gain-target, пустые — нулевой
+    gains = page.evaluate("viewer.Audio.harm.map(x => x.g.gain.value)")
+    live = [i for i, a in enumerate(sf["harmonics"]) if a > 0]
+    dead = [i for i, a in enumerate(sf["harmonics"]) if a == 0]
+    page.wait_for_timeout(600)
+    gains = page.evaluate("viewer.Audio.harm.map(x => x.g.gain.value)")
+    if page.evaluate("viewer.Audio.ctx.state") == "running":
+        assert all(gains[i] > 0 for i in live) and all(gains[i] == 0 for i in dead)
+    # водопад что-то нарисовал
+    px = page.evaluate("(() => { const c=viewer.WF.ctx.getImageData(0,0,240,64).data; let s=0; for (let i=0;i<c.length;i+=4) s+=c[i+1]; return s; })()")
+    assert px > 0
+    page.click("#btnAudio")
+    assert not page.evaluate("viewer.Audio.on")

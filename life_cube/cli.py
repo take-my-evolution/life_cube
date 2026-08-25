@@ -35,6 +35,10 @@ def build_parser():
     r.add_argument("--out", default="cube_ecology.png")
     r.add_argument("--save-state", default=None, help="путь для .npz со снимком")
     r.add_argument("--quiet", action="store_true")
+    r.add_argument("--wav", default=None,
+                   help="озвучить прогон в WAV (0.1 с на поколение)")
+    r.add_argument("--wav-spf", type=float, default=0.1, help="секунд на поколение")
+    r.add_argument("--base-hz", type=float, default=55.0)
 
     s = sub.add_parser("serve", help="веб-просмотр: http://host:port/")
     _common(s)
@@ -77,6 +81,11 @@ def run_cli(argv=None):
         return None
 
     cfg = _cfg(a, gens=a.gens)
+    if a.wav:
+        from .sound.synth import sonify_run, write_wav
+        frames, wave = sonify_run(cfg, use_gpu=a.gpu, seconds_per_frame=a.wav_spf,
+                                  base_hz=a.base_hz)
+        print("звук:", write_wav(a.wav, wave), f"({len(wave)/44100:.1f} с)")
     res = run(cfg, use_gpu=a.gpu, verbose=not a.quiet)
     if a.save_state:
         print("состояние:", save_state(res, a.save_state))

@@ -30,6 +30,7 @@
   tr { cursor:pointer; }
   td:first-child, th:first-child { text-align:left; }
   #pops { width:100%; height:70px; background:#0d0f14; border:1px solid var(--line); }
+  #waterfall { width:100%; height:96px; background:#0d0f14; border:1px solid var(--line); image-rendering:pixelated; }
   .muted { color:var(--dim); }
   #status { color:var(--dim); font-size:11px; }
 </style>
@@ -50,6 +51,20 @@
   <input id="rate" type="range" min="-1" max="3" step="0.02" value="1">
   <div class="row muted">мир <input id="seedWorld" type="number" value="0"> мут. <input id="seedMut" type="number" value="0"></div>
   <canvas id="pops"></canvas>
+
+  <h3>Звук</h3>
+  <div class="row">
+    <button id="btnAudio">Включить звук</button>
+    <span class="muted" id="audioState">выкл</span>
+  </div>
+  <div class="row"><span class="muted">Громкость</span> <span id="volLbl">0.5</span></div>
+  <input id="vol" type="range" min="0" max="1" step="0.01" value="0.5">
+  <div class="row"><span class="muted">Базовая частота</span> <span id="hzLbl">55 Гц</span></div>
+  <input id="baseHz" type="range" min="20" max="220" step="1" value="55">
+  <div class="row muted">микс: гармоники <input id="mixH" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.7">
+    голоса <input id="mixV" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.6">
+    шум <input id="mixN" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.3"></div>
+  <canvas id="waterfall" title="спектр-водопад: 64 полосы куба снизу вверх, время слева направо"></canvas>
 
   <h3>Проекция</h3>
   <div class="row">
@@ -322,6 +337,7 @@ function applyFrame(buf){
     firstFrame=false; }
   $('btnPause').textContent = S.paused ? 'Продолжить' : 'Пауза'; $('btnPause').classList.toggle('on', S.paused);
   rebuildInstances(); renderTable(); drawPops(); dirty=true;
+  S.sound = hdr.sound; Audio.apply(hdr.sound); WF.push(hdr.sound);
   S.connected=true;
 }
 function connect(){
@@ -333,9 +349,101 @@ function connect(){
 }
 if (location.protocol!=='file:') connect();
 
+// ------------------------------------------------------------------ звук
+// Бэкенд Web Audio по SoundFrame (hdr.sound). Модель та же, что в sound/synth.py:
+// 64 осциллятора-гармоники + шум по энтропии + пул голосов организмов.
+const Audio = {
+  ctx: null, on: false, nb: 64, harm: [], noise: null, noiseGain: null, master: null,
+  busH: null, busV: null, busN: null, voices: new Map(), baseHz: 55, frame: null,
+  init(){
+    if (this.ctx) return;
+    const ctx = this.ctx = new (window.AudioContext||window.webkitAudioContext)();
+    this.master = ctx.createGain(); this.master.gain.value = +$('vol').value;
+    const comp = ctx.createDynamicsCompressor(); comp.threshold.value = -18; comp.ratio.value = 4;
+    this.master.connect(comp); comp.connect(ctx.destination);
+    this.busH = ctx.createGain(); this.busV = ctx.createGain(); this.busN = ctx.createGain();
+    this.busH.gain.value = +$('mixH').value; this.busV.gain.value = +$('mixV').value; this.busN.gain.value = +$('mixN').value;
+    for (const b of [this.busH,this.busV,this.busN]) b.connect(this.master);
+    // гармоники
+    for (let h=1; h<=this.nb; h++){
+      const o = ctx.createOscillator(); o.type='sine'; o.frequency.value = this.baseHz*h;
+      const g = ctx.createGain(); g.gain.value = 0; o.connect(g); g.connect(this.busH); o.start();
+      this.harm.push({o,g});
+    }
+    // шум: буфер белого шума + фильтр, громкость по энтропии
+    const len = ctx.sampleRate*2, buf = ctx.createBuffer(1,len,ctx.sampleRate), d = buf.getChannelData(0);
+    for (let i=0;i<len;i++) d[i]=Math.random()*2-1;
+    const src = ctx.createBufferSource(); src.buffer=buf; src.loop=true;
+    const bp = ctx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value=1200; bp.Q.value=0.5;
+    this.noiseGain = ctx.createGain(); this.noiseGain.gain.value=0;
+    src.connect(bp); bp.connect(this.noiseGain); this.noiseGain.connect(this.busN); src.start();
+    this.noise = {src,bp};
+  },
+  setBase(hz){ this.baseHz=hz; if(!this.ctx) return; const t=this.ctx.currentTime;
+    this.harm.forEach((x,i)=>x.o.frequency.setTargetAtTime(hz*(i+1), t, 0.05));
+    for (const v of this.voices.values()) v.o.frequency.setTargetAtTime(hz*v.h, t, 0.05); },
+  apply(sf){
+    this.frame = sf; if (!this.ctx || !this.on || !sf) return;
+    const t = this.ctx.currentTime, tau = 0.08, sr2 = this.ctx.sampleRate/2;
+    let entW=0, aSum=0;
+    for (let h=0; h<this.nb; h++){
+      const f = this.baseHz*(h+1); const a = f<sr2 ? sf.harmonics[h]/Math.sqrt(h+1) : 0;
+      this.harm[h].g.gain.setTargetAtTime(a*0.25, t, tau);
+      entW += sf.harmonics[h]*sf.noise[h]; aSum += sf.harmonics[h];
+    }
+    this.noiseGain.gain.setTargetAtTime(aSum? 0.35*entW/aSum : 0, t, 0.2);
+    // голоса: пул по устойчивым id
+    const seen = new Set();
+    for (const v of sf.voices){
+      seen.add(v.vid); let node = this.voices.get(v.vid);
+      if (!node){
+        const o=this.ctx.createOscillator(); o.type='triangle'; o.frequency.value=this.baseHz*v.harmonic;
+        const lfo=this.ctx.createOscillator(); lfo.frequency.value=5; const lg=this.ctx.createGain(); lg.gain.value=0;
+        lfo.connect(lg); lg.connect(o.frequency); lfo.start();
+        const g=this.ctx.createGain(); g.gain.value=0; const p=this.ctx.createStereoPanner(); p.pan.value=v.pan;
+        o.connect(g); g.connect(p); p.connect(this.busV); o.start();
+        node={o,g,p,lg,h:v.harmonic}; this.voices.set(v.vid,node);
+        // рождение: короткий всплеск
+        g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(0.5/Math.pow(v.harmonic,0.3), t+0.03);
+      }
+      node.g.gain.setTargetAtTime(0.3*v.amp/Math.pow(v.harmonic,0.3), t, 0.15);
+      node.p.pan.setTargetAtTime(v.pan, t, 0.3);
+      node.lg.gain.setTargetAtTime(v.vib*this.baseHz*v.harmonic*0.02, t, 0.2);
+    }
+    for (const [vid,node] of this.voices){ if (seen.has(vid)) continue;
+      node.g.gain.setTargetAtTime(0, t, 0.25);          // гибель: затухание
+      setTimeout(()=>{ try{node.o.stop(); node.lg.disconnect(); node.g.disconnect();}catch(e){} }, 1500);
+      this.voices.delete(vid); }
+  },
+  toggle(){
+    this.init(); if (this.ctx.state==='suspended') this.ctx.resume();
+    this.on=!this.on; if(!this.on){ const t=this.ctx.currentTime; this.harm.forEach(x=>x.g.gain.setTargetAtTime(0,t,0.05)); this.noiseGain.gain.setTargetAtTime(0,t,0.05);
+      for (const v of this.voices.values()) v.g.gain.setTargetAtTime(0,t,0.05); }
+    else this.apply(this.frame);
+    $('btnAudio').textContent = this.on?'Выключить звук':'Включить звук'; $('btnAudio').classList.toggle('on',this.on);
+    $('audioState').textContent = this.on ? `вкл, ${this.ctx.sampleRate} Гц` : 'выкл';
+  },
+};
+$('btnAudio').onclick = ()=>Audio.toggle();
+$('vol').oninput = e=>{ $('volLbl').textContent=e.target.value; if(Audio.master) Audio.master.gain.setTargetAtTime(+e.target.value, Audio.ctx.currentTime, 0.05); };
+$('baseHz').oninput = e=>{ $('hzLbl').textContent=e.target.value+' Гц'; Audio.setBase(+e.target.value); };
+$('mixH').oninput = e=>{ if(Audio.busH) Audio.busH.gain.value=+e.target.value; };
+$('mixV').oninput = e=>{ if(Audio.busV) Audio.busV.gain.value=+e.target.value; };
+$('mixN').oninput = e=>{ if(Audio.busN) Audio.busN.gain.value=+e.target.value; };
+
+// водопад: 64 строки (полосы куба снизу вверх), столбец на кадр, яркость = амплитуда, оттенок = шум
+const WF = { canvas: $('waterfall'), col: 0, w: 240, h: 64, ctx: null, img: null,
+  init(){ this.canvas.width=this.w; this.canvas.height=this.h; this.ctx=this.canvas.getContext('2d');
+    this.ctx.fillStyle='#0d0f14'; this.ctx.fillRect(0,0,this.w,this.h); },
+  push(sf){ if(!this.ctx) this.init(); if(!sf) return;
+    const img=this.ctx.getImageData(1,0,this.w-1,this.h); this.ctx.putImageData(img,0,0);
+    for (let h=0;h<this.h;h++){ const a=sf.harmonics[h]||0, nz=sf.noise[h]||0; const y=this.h-1-h;
+      const r=Math.round(255*a*(0.4+0.6*nz)), g=Math.round(255*a*(0.9-0.5*nz)), b=Math.round(255*a*(0.8-0.3*nz));
+      this.ctx.fillStyle=`rgb(${r},${g},${b})`; this.ctx.fillRect(this.w-1,y,1,1); } } };
+
 // --------------------------------------------- API для тестов и скриптов
 window.viewer = {
-  S, gl, applyFrame, draw: ()=>{ dirty=false; draw(); },
+  S, gl, applyFrame, Audio, WF, draw: ()=>{ dirty=false; draw(); },
   set(k,v){ S[k]=v; dirty=true; }, setView(v){ setView(v); dirty=true; },
   readPixels(){ resize(); draw(); const w=canvas.width,h=canvas.height; const px=new Uint8Array(w*h*4); gl.readPixels(0,0,w,h,gl.RGBA,gl.UNSIGNED_BYTE,px); return {w,h,px}; },
   // подсчёт пикселей по ближайшему цвету вида (для тестов): возвращает {bg, stone, s1..s4, other}

@@ -24,12 +24,14 @@ import numpy as np
 from ...config import Config, SPECIES_NAMES
 from ...engine import Engine
 from ...snapshot import Snapshot
+from ...sound import SoundMapper
 
 STATIC = pathlib.Path(__file__).parent / "static"
 
 
-def encode_snapshot(snap: Snapshot, first=False) -> bytes:
+def encode_snapshot(snap: Snapshot, first=False, sound=None) -> bytes:
     header = {
+        "sound": sound.to_dict() if sound is not None else None,
         "gen": snap.gen, "n": snap.n, "k": int(len(snap.coords)),
         "m": int(len(snap.soil_coords)) if snap.soil_coords is not None else 0,
         "pops": snap.pops,
@@ -74,10 +76,16 @@ class WebViewer:
         self.clients = set()
         self.latest = None
         self._new = asyncio.Event()
+        self.mapper = SoundMapper()
+        self.latest_sound = None
         engine.on_snapshot(self._on_snapshot)
 
     # вызывается из потока симуляции
     def _on_snapshot(self, snap):
+        try:
+            self.latest_sound = self.mapper.map(snap)
+        except Exception:               # звук не должен ронять симуляцию
+            self.latest_sound = None
         self.latest = snap
         if self.loop is not None:
             self.loop.call_soon_threadsafe(self._new.set)
@@ -89,7 +97,7 @@ class WebViewer:
             snap = self.latest
             if snap is None or not self.clients:
                 continue
-            data = encode_snapshot(snap)
+            data = encode_snapshot(snap, sound=self.latest_sound)
             dead = []
             for ws in list(self.clients):
                 try:
@@ -104,7 +112,7 @@ class WebViewer:
         ws = web.WebSocketResponse(max_msg_size=64 * 1024 * 1024)
         await ws.prepare(request)
         snap = self.latest or self.engine.publish(force=True)
-        await ws.send_bytes(encode_snapshot(snap, first=True))
+        await ws.send_bytes(encode_snapshot(snap, first=True, sound=self.latest_sound))
         self.clients.add(ws)
         try:
             async for msg in ws:
@@ -138,6 +146,8 @@ class WebViewer:
             e.reset(cfg)
         elif c == "snapshot":
             e.publish(force=True)
+        elif c == "reset_sound":
+            self.mapper = SoundMapper()
         else:
             raise ValueError(f"неизвестная команда {c!r}")
 
