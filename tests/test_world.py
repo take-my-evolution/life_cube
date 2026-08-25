@@ -41,7 +41,7 @@ def test_world_layout():
     xs, ys, zs = np.nonzero(species)
     assert np.array_equal(zs, relief[xs, ys])
     # все четыре вида представлены примерно поровну
-    counts = np.bincount(species[species > 0], minlength=5)[1:]
+    counts = np.bincount(species[species > 0], minlength=cfg.n_species + 1)[1:]
     assert (counts > 0).all() and counts.max() - counts.min() <= 1
 
 

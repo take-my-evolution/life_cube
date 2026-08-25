@@ -43,7 +43,7 @@ def encode_snapshot(snap: Snapshot, first=False, sound=None) -> bytes:
         "hist_tail": [list(map(int, h)) for h in getattr(snap, "hist", [])[-400:]],
     }
     if first:
-        header["species_names"] = list(SPECIES_NAMES)
+        header["species_names"] = list(SPECIES_NAMES)[:len(snap.pops)]
         relief = getattr(snap, "relief", None)
         header["relief"] = relief.astype(int).tolist() if relief is not None else None
     hb = json.dumps(header, ensure_ascii=False).encode()

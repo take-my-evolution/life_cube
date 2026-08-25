@@ -9,7 +9,7 @@
 """
 
 from .config import Config
-from .fields import light_field, water_field, resource
+from .fields import light_field, water_field, water_supply, resource
 
 
 def step(state: dict, cfg: Config, xp, correlate, gen: int = 0):
@@ -31,10 +31,14 @@ def step(state: dict, cfg: Config, xp, correlate, gen: int = 0):
     L = light_field(alive, absorb, xp)
     W = water_field(alive, stone, soil, wet, cfg, xp)
 
-    # вода, дотянувшаяся до пустой клетки снизу: сама пустая клетка воды не
-    # содержит, поэтому для рождения смотрим на клетку под ней
-    Wsup = xp.zeros_like(W)
-    Wsup[:, :, 1:] = W[:, :, :-1] * cfg.water_decay
+    # вода, дотянувшаяся до пустой клетки: снизу или (для ветвления) сбоку
+    Wsup = water_supply(W, cfg, xp)
+
+    # есть ли под пустой клеткой опора — живое тело, камень или почва.
+    # С опорой это рост вверх (вес up), без опоры — ветвление вбок
+    # (вес branch × свет: ветвиться выгодно только на свету).
+    supported = xp.zeros(species.shape, dtype=bool)
+    supported[:, :, 1:] = (alive | stone | soil)[:, :, :-1]
 
     # --- рождение: голосование соседей за то, чей вид займёт пустое место ---
     empty = (~alive) & (~stone)
@@ -52,8 +56,11 @@ def step(state: dict, cfg: Config, xp, correlate, gen: int = 0):
               & (nb < g[2] + cfg.birth_window)     # но не давка
               & (R > g[3])                         # ресурса хватает виду
               & (Wsup > cfg.water_min))            # вода дотянулась
+        branch = float(g[5]) if len(g) > 5 else 0.0
+        ok = ok & (supported | (branch > 0))
         # ВАЖНО: сравниваем избыток над собственным порогом, а не абсолют.
-        score = xp.where(ok, mine * g[1] * (R - g[3]), -1.0).astype(xp.float32)
+        weight = xp.where(supported, g[1], branch * L)
+        score = xp.where(ok, mine * weight * (R - g[3]), -1.0).astype(xp.float32)
         upd = score > best_score
         best_score = xp.where(upd, score, best_score)
         best_sp = xp.where(upd, xp.int8(s), best_sp)

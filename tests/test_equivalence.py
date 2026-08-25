@@ -18,8 +18,10 @@ def test_bitwise_equivalent_to_legacy():
     legacy = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(legacy)
 
+    from life_cube.config import DEFAULT_GENOMES
     kw = dict(n=32, gens=25, seed_density=0.02)
-    new = run(Config(**kw), verbose=False)
+    g4 = DEFAULT_GENOMES[:4].copy(); g4[:, 5] = 0.0      # ветвление выключено
+    new = run(Config(genomes=g4, lateral_decay=0.0, **kw), verbose=False)
     old = legacy.run(legacy.Config(**kw), verbose=False)
     assert np.array_equal(new["hist"], old["hist"])
     assert np.array_equal(new["species"], old["species"])

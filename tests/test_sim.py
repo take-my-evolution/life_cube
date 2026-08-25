@@ -15,7 +15,7 @@ def test_run_shapes_and_history():
     res = run(cfg, verbose=False)
     n = cfg.n
     assert res["species"].shape == (n, n, n)
-    assert res["hist"].shape == (cfg.gens, 4)
+    assert res["hist"].shape == (cfg.gens, cfg.n_species)
     assert (res["hist"] >= 0).all()
     assert not (res["stone"] & (res["species"] > 0)).any()
     assert not (res["stone"] & res["soil"]).any()

@@ -73,16 +73,16 @@ def test_page_loads_and_shows_life(page, server):
     S = page.evaluate("({gen: viewer.S.gen, k: viewer.S.k, n: viewer.S.n, comps: viewer.S.comps.length})")
     assert S["gen"] == 15 and S["n"] == 24 and S["k"] > 0 and S["comps"] > 0
     h = hist(page)
-    live = h["s1"] + h["s2"] + h["s3"] + h["s4"]
+    live = h["s1"] + h["s2"] + h["s3"] + h["s4"] + h["s5"]
     assert live > 200, h
     assert h["stone"] > 200, h
 
 
 def test_species_filter(page):
-    page.evaluate("viewer.set('ghost', false); viewer.set('speciesMask', [0,1,0,0])")
+    page.evaluate("viewer.set('ghost', false); viewer.set('speciesMask', [0,1,0,0,0,0,0,0])")
     h = hist(page)
-    assert h["s2"] > 0 and h["s1"] + h["s3"] + h["s4"] < 30, h
-    page.evaluate("viewer.set('speciesMask', [1,1,1,1])")
+    assert h["s2"] > 0 and h["s1"] + h["s3"] + h["s4"] + h["s5"] < 30, h
+    page.evaluate("viewer.set('speciesMask', [1,1,1,1,1,1,1,1])")
 
 
 def test_clip_z_removes_upper_cells(page):
@@ -91,7 +91,7 @@ def test_clip_z_removes_upper_cells(page):
     page.evaluate("viewer.set('clipZ', 3)")
     cut = hist(page)
     page.evaluate("viewer.set('clipZ', 1e9); viewer.set('showStone', true)")
-    live = lambda h: h["s1"] + h["s2"] + h["s3"] + h["s4"]
+    live = lambda h: h["s1"] + h["s2"] + h["s3"] + h["s4"] + h["s5"]
     assert 0 < live(cut) < live(full), (full, cut)
 
 
@@ -101,16 +101,16 @@ def test_top_view_matches_columns(page, server):
     h = hist(page)
     sp = server["engine"].state["species"]
     cols = int((sp > 0).any(axis=2).sum())
-    live = h["s1"] + h["s2"] + h["s3"] + h["s4"]
+    live = h["s1"] + h["s2"] + h["s3"] + h["s4"] + h["s5"]
     # площадь одной клетки в пикселях ~ (высота/ (dist*0.9))^2 — проверяем через отношение
     px_per_cell = live / cols
     assert 20 < px_per_cell < 2000, (live, cols)
     # спереди/сбоку жизнь ниже — не должно быть пикселей над камнем выше max z: проверка ортогональности осей
-    page.evaluate("viewer.set('speciesMask',[1,0,0,0])")
+    page.evaluate("viewer.set('speciesMask',[1,0,0,0,0,0,0,0])")
     h1 = hist(page)
     cols1 = int((sp == 1).any(axis=2).sum())
     assert abs(h1["s1"] / max(1, px_per_cell) - cols1) / max(cols1, 1) < 0.35, (h1, cols1)
-    page.evaluate("viewer.set('speciesMask',[1,1,1,1]); viewer.set('proj','persp'); viewer.setView('iso'); viewer.set('showStone', true)")
+    page.evaluate("viewer.set('speciesMask',[1,1,1,1,1,1,1,1]); viewer.set('proj','persp'); viewer.setView('iso'); viewer.set('showStone', true)")
 
 
 def test_select_organism(page, server):
@@ -119,7 +119,7 @@ def test_select_organism(page, server):
     page.evaluate(f"viewer.set('ghost', false); viewer.set('showStone', false); viewer.set('selected', {big.cid})")
     h = hist(page)
     key = f"s{big.species}"
-    others = sum(h[f"s{s}"] for s in (1, 2, 3, 4) if s != big.species)
+    others = sum(h[f"s{s}"] for s in (1, 2, 3, 4, 5) if s != big.species)
     assert h[key] > 0 and others < 30, h
     page.evaluate("viewer.set('selected', 0); viewer.set('showStone', true)")
 

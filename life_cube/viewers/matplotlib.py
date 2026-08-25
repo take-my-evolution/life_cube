@@ -18,16 +18,18 @@ def render(result, path="cube_ecology.png"):
     n = sp.shape[0]
 
     BG = "#0d0f14"
-    COL = {1: "#2ec7b8", 2: "#f2c14e", 3: "#c05ce0", 4: "#f2683c"}
+    COL = {1: "#2ec7b8", 2: "#f2c14e", 3: "#c05ce0", 4: "#f2683c", 5: "#7bd94a"}
+    n_sp = hist.shape[1] if hist.ndim == 2 else 4
+    SP = list(range(1, n_sp + 1))
     STONE, SOIL = "#2a2d36", "#4a3b2f"
-    cmap = ListedColormap([BG, STONE, SOIL] + [COL[i] for i in (1, 2, 3, 4)])
-    norm = BoundaryNorm(np.arange(-0.5, 7.5), cmap.N)
+    cmap = ListedColormap([BG, STONE, SOIL] + [COL[i] for i in SP])
+    norm = BoundaryNorm(np.arange(-0.5, 3.5 + n_sp), cmap.N)
 
     def code(s_sp, s_stone, s_soil):
         out = np.zeros(s_sp.shape, dtype=np.int8)
         out[s_stone] = 1
         out[s_soil] = 2
-        for s in (1, 2, 3, 4):
+        for s in SP:
             out[s_sp == s] = 2 + s
         return out
 
@@ -72,7 +74,7 @@ def render(result, path="cube_ecology.png"):
 
     # 3 — история популяций
     ax = fig.add_subplot(gs[1, 1], facecolor="#12151c")
-    for s in (1, 2, 3, 4):
+    for s in SP:
         ax.plot(hist[:, s - 1], color=COL[s], lw=1.8)
     ax.set_title("Население по видам", color="#c9d1d9", fontsize=12, pad=8)
     ax.tick_params(colors="#6e7681", labelsize=8)
@@ -94,14 +96,14 @@ def render(result, path="cube_ecology.png"):
             s_.set_color("#232833")
 
     total = int((sp > 0).sum())
-    fig.suptitle(f"Куб {n}³ · {len(hist)} поколений · четыре вида на камне · "
+    fig.suptitle(f"Куб {n}³ · {len(hist)} поколений · {n_sp} видов на камне · "
                  f"{total} живых клеток", color="#e6edf3", fontsize=17, y=0.975)
-    labels = [f"{i} · {SPECIES_NAMES[i - 1]}" for i in (1, 2, 3, 4)] + \
+    labels = [f"{i} · {SPECIES_NAMES[i - 1]}" for i in SP] + \
              ["камень", "почва (растворён)"]
-    cols = [COL[i] for i in (1, 2, 3, 4)] + [STONE, SOIL]
+    cols = [COL[i] for i in SP] + [STONE, SOIL]
     handles = [plt.Line2D([], [], marker="s", ls="", ms=10, mfc=c, mec="none")
                for c in cols]
-    fig.legend(handles, labels, loc="upper center", ncol=6, frameon=False,
+    fig.legend(handles, labels, loc="upper center", ncol=n_sp + 2, frameon=False,
                bbox_to_anchor=(0.5, 0.912), labelcolor="#8b949e", fontsize=10)
 
     fig.savefig(path, dpi=110, facecolor=BG)
