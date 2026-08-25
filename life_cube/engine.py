@@ -75,7 +75,7 @@ class Engine:
             self.hist.append(pops)
         return pops
 
-    def publish(self, force=False):
+    def publish(self, force=False, components=None):
         """Снимок текущего состояния. snapshot_every=0 — из цикла не зовётся,
         снимки делает наблюдатель в своём темпе (см. viewers/web)."""
         if not force and (self.snapshot_every <= 0 or self.gen % self.snapshot_every):
@@ -87,8 +87,12 @@ class Engine:
             cpu = {"species": to_cpu(self.state["species"]).copy(),
                    "soil": to_cpu(self.state["soil"]).copy()}
             hist = list(self.hist)
+        want = self.components if components is None else (components and self.components)
         snap = make_snapshot(cpu, gen, self.cfg, self.tracker,
-                             with_components=self.components)
+                             with_components=want)
+        if not want and self.last_snapshot is not None:
+            # переиспользуем прошлую разметку организмов: она обновляется реже
+            snap.components = self.last_snapshot.components
         snap.relief = self.relief
         snap.hist = hist
         snap.rate = self.rate
