@@ -27,9 +27,19 @@ def step(state: dict, cfg: Config, xp, correlate, gen: int = 0):
 
     idx = xp.clip(species.astype(xp.int32) - 1, 0, n_sp - 1)
     absorb = xp.where(alive, G[idx, 0], 0.0).astype(xp.float32)
+    n_fields = G.shape[1]
+    has_hunt = n_fields > 6 and float(cfg.genomes[:, 6].max()) > 0
+    # взвешенная "хищность" вокруг каждой клетки — сколько её едят
+    if has_hunt:
+        hunt_map = xp.where(alive, G[idx, 6], 0.0).astype(xp.float32)
+        eaten = correlate(hunt_map, K, mode="constant", cval=0.0)
+        # добыча — только растения (hunt == 0): хищники друг друга не едят,
+        # иначе они питаются собой и размножаются без предела
+        plant = alive & (hunt_map <= 0)
+        prey_all = correlate(plant.astype(xp.float32), K, mode="constant", cval=0.0)
 
     L = light_field(alive, absorb, xp)
-    W = water_field(alive, stone, soil, wet, cfg, xp)
+    W = water_field(alive, stone, soil, wet, cfg, xp, state.get("maxfilter"))
 
     # вода, дотянувшаяся до пустой клетки: снизу или (для ветвления) сбоку
     Wsup = water_supply(W, cfg, xp)
@@ -50,14 +60,22 @@ def step(state: dict, cfg: Config, xp, correlate, gen: int = 0):
         mine = correlate((species == s).astype(xp.float32), K,
                          mode="constant", cval=0.0)
         R = resource(g, L, Wsup, xp)
+        hunt = float(g[6]) if n_fields > 6 else 0.0
+        if hunt > 0:
+            prey = xp.minimum(prey_all, cfg.prey_cap)   # насыщение: больше 2–3 жертв не съесть
+            R = R + hunt * cfg.prey_gain * prey
         ok = (empty
               & (mine > g[2] * cfg.birth_own)     # свои дали достаточно голосов
               & (nb > g[2])                        # опоры хватает
               & (nb < g[2] + cfg.birth_window)     # но не давка
-              & (R > g[3])                         # ресурса хватает виду
-              & (Wsup > cfg.water_min))            # вода дотянулась
+              & (R > g[3]))                        # ресурса хватает виду
+        if hunt > 0:
+            # хищнику вода снизу не обязательна, если рядом есть добыча
+            ok = ok & ((Wsup > cfg.water_min) | (prey > 0.5))
+        else:
+            ok = ok & (Wsup > cfg.water_min)       # вода дотянулась
         branch = float(g[5]) if len(g) > 5 else 0.0
-        ok = ok & (supported | (branch > 0))
+        ok = ok & (supported | (branch > 0) | (hunt > 0))
         # ВАЖНО: сравниваем избыток над собственным порогом, а не абсолют.
         weight = xp.where(supported, g[1], branch * L)
         score = xp.where(ok, mine * weight * (R - g[3]), -1.0).astype(xp.float32)
@@ -73,10 +91,21 @@ def step(state: dict, cfg: Config, xp, correlate, gen: int = 0):
     for s in range(1, n_sp + 1):
         m = species == s
         g = cfg.genomes[s - 1]
-        Rlive = xp.where(m, resource(g, L, W, xp), Rlive)
+        Rs = resource(g, L, W, xp)
+        hunt = float(g[6]) if n_fields > 6 else 0.0
+        if hunt > 0:
+            Rs = Rs + hunt * cfg.prey_gain * xp.minimum(prey_all, cfg.prey_cap)
+        Rlive = xp.where(m, Rs, Rlive)
         need = xp.where(m, g[3] * cfg.surv_factor, need)
 
     survive = alive & (nb < cfg.crowd_max) & (Rlive > need)
+
+    # --- хищничество: жертву съедают с вероятностью ~ хищность соседей ---
+    if has_hunt:
+        pressure = eaten / xp.maximum(nb, 1e-6)      # доля хищности среди соседей
+        p_eat = xp.clip(cfg.kill_rate * pressure, 0.0, 0.95)
+        killed = plant & (rng.random(species.shape) < p_eat)
+        survive = survive & ~killed
 
     # --- мутация при делении: пока просто смена вида ---
     mut = born & (rng.random(species.shape) < cfg.p_mutate)

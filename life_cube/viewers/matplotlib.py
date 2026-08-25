@@ -18,7 +18,8 @@ def render(result, path="cube_ecology.png"):
     n = sp.shape[0]
 
     BG = "#0d0f14"
-    COL = {1: "#2ec7b8", 2: "#f2c14e", 3: "#c05ce0", 4: "#f2683c", 5: "#7bd94a"}
+    COL = {1: "#2ec7b8", 2: "#f2c14e", 3: "#c05ce0", 4: "#f2683c", 5: "#7bd94a",
+           6: "#4a9ef2", 7: "#f24a9e", 8: "#d9d9d9"}
     n_sp = hist.shape[1] if hist.ndim == 2 else 4
     SP = list(range(1, n_sp + 1))
     STONE, SOIL = "#2a2d36", "#4a3b2f"

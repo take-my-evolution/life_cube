@@ -18,22 +18,26 @@ def light_field(alive, absorb, xp=np):
     return out
 
 
-def _spread_lateral(cur, body, steps, decay, xp):
-    """Вода растекается по живому телу в пределах слоя: каждый шаг клетка
-    берёт максимум из своего значения и (сосед × decay) по четырём сторонам.
-    Достаёт на `steps` клеток вбок от источника — это и есть длина ветки,
-    которую ствол способен напоить за одно поколение."""
+def _spread_lateral(W, alive, steps, decay, xp):
+    """Вода растекается вбок по живому телу: каждый шаг клетка берёт максимум
+    из своего значения и (сосед × decay) по четырём горизонтальным сторонам.
+    Достаёт на `steps` клеток от ствола — это длина ветки, которую ствол
+    способен напоить.
+
+    Считается сразу по всему объёму (а не послойно): боковое распределение
+    отстаёт на поколение от вертикального, зато это 4 операции на весь куб
+    вместо 4·n операций по слоям — на GPU разница в десятки раз."""
     for _ in range(steps):
-        nb = xp.zeros_like(cur)
-        nb[1:, :] = xp.maximum(nb[1:, :], cur[:-1, :])
-        nb[:-1, :] = xp.maximum(nb[:-1, :], cur[1:, :])
-        nb[:, 1:] = xp.maximum(nb[:, 1:], cur[:, :-1])
-        nb[:, :-1] = xp.maximum(nb[:, :-1], cur[:, 1:])
-        cur = xp.where(body, xp.maximum(cur, nb * decay), cur)
-    return cur
+        nb = xp.zeros_like(W)
+        nb[1:, :, :] = W[:-1, :, :]
+        nb[:-1, :, :] = xp.maximum(nb[:-1, :, :], W[1:, :, :])
+        nb[:, 1:, :] = xp.maximum(nb[:, 1:, :], W[:, :-1, :])
+        nb[:, :-1, :] = xp.maximum(nb[:, :-1, :], W[:, 1:, :])
+        W = xp.where(alive, xp.maximum(W, nb * decay), W)
+    return W
 
 
-def water_field(alive, stone, soil, wet, cfg: Config, xp=np):
+def water_field(alive, stone, soil, wet, cfg: Config, xp=np, mf=None):
     """Вода поднимается из подложки по телу организма, теряя долю на каждом
     шаге вверх и (сильнее) на каждом шаге вбок. Разрыв в теле обрывает
     поток: висящие в воздухе структуры остаются без снабжения и гибнут.
@@ -46,11 +50,10 @@ def water_field(alive, stone, soil, wet, cfg: Config, xp=np):
         s = stone[:, :, z]
         cur = xp.where(s, wet, cur * cfg.water_decay)
         cur = xp.where(soil[:, :, z], xp.maximum(cur, wet * 1.15), cur)
-        body = alive[:, :, z]
-        cur = xp.where(body | s | soil[:, :, z], cur, 0.0)
-        if lateral:
-            cur = _spread_lateral(cur, body, cfg.lateral_steps, cfg.lateral_decay, xp)
+        cur = xp.where(alive[:, :, z] | s | soil[:, :, z], cur, 0.0)
         W[:, :, z] = cur
+    if lateral:
+        W = _spread_lateral(W, alive, cfg.lateral_steps, cfg.lateral_decay, xp)
     return W
 
 

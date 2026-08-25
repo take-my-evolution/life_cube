@@ -4,7 +4,7 @@ import time
 
 import numpy as np
 
-from .backend import get_backend, to_cpu
+from .backend import get_backend, max_filter_for, to_cpu
 from .config import Config
 from .step import step
 from .world import build_kernel, build_world
@@ -21,6 +21,7 @@ def init_state(cfg: Config, xp):
         "genomes": xp.asarray(cfg.genomes),
         # отдельный поток случайности для жизни — не смешивается с сидом мира
         "rng": xp.random.default_rng(cfg.seed_mut),
+        "maxfilter": max_filter_for(xp),
     }
     return state, relief
 

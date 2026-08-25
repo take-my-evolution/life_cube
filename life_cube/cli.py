@@ -44,10 +44,11 @@ def build_parser():
     _common(s)
     s.add_argument("--host", default="0.0.0.0")
     s.add_argument("--port", type=int, default=8765)
-    s.add_argument("--rate", type=float, default=10.0,
+    s.add_argument("--rate", type=float, default=0.0,
                    help="целевых поколений/с (0 = без предела)")
-    s.add_argument("--snapshot-every", type=int, default=1,
-                   help="слать снимок каждое k-е поколение")
+    s.add_argument("--snapshot-every", type=int, default=0,
+                   help="снимок каждое k-е поколение; 0 = независимо от симуляции, не чаще --fps")
+    s.add_argument("--fps", type=float, default=25.0, help="предел кадров/с для зрителей")
     s.add_argument("--no-components", action="store_true",
                    help="не считать организмы (быстрее)")
     s.add_argument("--paused", action="store_true", help="стартовать на паузе")
@@ -77,7 +78,7 @@ def run_cli(argv=None):
         from .viewers.web import serve
         serve(_cfg(a), use_gpu=a.gpu, host=a.host, port=a.port, rate=a.rate,
               snapshot_every=a.snapshot_every, components=not a.no_components,
-              autostart=not a.paused)
+              autostart=not a.paused, fps=a.fps)
         return None
 
     cfg = _cfg(a, gens=a.gens)

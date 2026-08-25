@@ -8,7 +8,7 @@
 import threading
 import time
 
-from .backend import get_backend
+from .backend import get_backend, to_cpu
 from .config import Config
 from .sim import init_state
 from .snapshot import Tracker, make_snapshot
@@ -76,12 +76,21 @@ class Engine:
         return pops
 
     def publish(self, force=False):
-        if not force and self.gen % self.snapshot_every:
+        """Снимок текущего состояния. snapshot_every=0 — из цикла не зовётся,
+        снимки делает наблюдатель в своём темпе (см. viewers/web)."""
+        if not force and (self.snapshot_every <= 0 or self.gen % self.snapshot_every):
             return None
-        snap = make_snapshot(self.state, self.gen, self.cfg, self.tracker,
+        # копируем массивы под замком (быстро), тяжёлую разметку делаем без него,
+        # чтобы симуляция не ждала CPU
+        with self._lock:
+            gen = self.gen
+            cpu = {"species": to_cpu(self.state["species"]).copy(),
+                   "soil": to_cpu(self.state["soil"]).copy()}
+            hist = list(self.hist)
+        snap = make_snapshot(cpu, gen, self.cfg, self.tracker,
                              with_components=self.components)
         snap.relief = self.relief
-        snap.hist = list(self.hist)
+        snap.hist = hist
         snap.rate = self.rate
         snap.measured_rate = self.measured_rate
         snap.paused = self.paused

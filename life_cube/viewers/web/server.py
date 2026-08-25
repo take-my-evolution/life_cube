@@ -70,8 +70,9 @@ def decode_snapshot(buf: bytes):
 
 
 class WebViewer:
-    def __init__(self, engine: Engine):
+    def __init__(self, engine: Engine, fps=25.0):
         self.engine = engine
+        self.fps = fps                 # верхний предел снимков в секунду
         self.loop = None
         self.clients = set()
         self.latest = None
@@ -91,9 +92,22 @@ class WebViewer:
             self.loop.call_soon_threadsafe(self._new.set)
 
     async def broadcaster(self):
+        """Кадры уходят не чаще fps и только зрителям. Если движок не
+        публикует сам (snapshot_every=0), снимок делаем здесь, в пуле потоков,
+        чтобы ни симуляция, ни event loop не ждали разметки организмов."""
+        pull = self.engine.snapshot_every <= 0
+        last_gen = -1
         while True:
-            await self._new.wait()
-            self._new.clear()
+            if pull:
+                await asyncio.sleep(1.0 / self.fps)
+                if not self.clients or self.engine.gen == last_gen:
+                    continue
+                last_gen = self.engine.gen
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: self.engine.publish(force=True))
+            else:
+                await self._new.wait()
+                self._new.clear()
             snap = self.latest
             if snap is None or not self.clients:
                 continue
@@ -167,15 +181,15 @@ class WebViewer:
         return app
 
 
-def serve(cfg: Config, use_gpu=False, host="0.0.0.0", port=8765, rate=10.0,
-          snapshot_every=1, components=True, autostart=True):
+def serve(cfg: Config, use_gpu=False, host="0.0.0.0", port=8765, rate=0.0,
+          snapshot_every=0, components=True, autostart=True, fps=25.0):
     """Поднять движок в фоновом потоке и веб-сервер в текущем."""
     from aiohttp import web
     engine = Engine(cfg, use_gpu=use_gpu, rate=rate,
                     snapshot_every=snapshot_every, components=components)
     if not autostart:
         engine.pause()
-    viewer = WebViewer(engine)
+    viewer = WebViewer(engine, fps=fps)
     th = threading.Thread(target=engine.run, daemon=True, name="life-cube-sim")
     th.start()
     print(f"life-cube web viewer: http://{host}:{port}/  "

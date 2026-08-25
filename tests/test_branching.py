@@ -81,7 +81,7 @@ def test_default_world_grows_trees_and_keeps_others():
     from life_cube import run
     res = run(cfg, verbose=False)
     pops = res["hist"][-1]
-    assert cfg.n_species == 5 and pops[4] > 0          # дерево выжило
+    assert cfg.n_species == 8 and pops[4] > 0          # дерево выжило
     assert (pops > 0).sum() >= 3
     # у дерева есть клетки без опоры снизу — ветви
     sp = res["species"]; alive = sp > 0
