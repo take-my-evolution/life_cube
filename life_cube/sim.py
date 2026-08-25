@@ -11,9 +11,11 @@ from .world import build_kernel, build_world
 
 
 def init_state(cfg: Config, xp):
-    stone, wet, species, relief = build_world(cfg, xp)
+    stone, wet, species, relief, energy = build_world(cfg, xp)
     state = {
         "species": species,
+        "energy": energy,
+        "age": xp.zeros((cfg.n,) * 3, dtype=xp.int32),
         "stone": stone,
         "soil": xp.zeros((cfg.n,) * 3, dtype=bool),
         "wet": wet,
@@ -49,6 +51,7 @@ def run(cfg: Config, use_gpu: bool = False, verbose: bool = True,
 
     return {
         "species": to_cpu(state["species"]),
+        "energy": to_cpu(state["energy"]),
         "stone": to_cpu(state["stone"]),
         "soil": to_cpu(state["soil"]),
         "relief": relief,

@@ -53,6 +53,28 @@ class Engine:
             self._step_request += 1
         self._wake.set()
 
+    def set_genomes(self, genomes):
+        """Заменить геномы на лету, не трогая мир. Если менялось число видов
+        или подвижность — состояние остаётся, роли пересчитаются на следующем
+        шаге."""
+        import numpy as np
+        g = np.asarray(genomes, dtype=np.float32)
+        if g.ndim != 2:
+            raise ValueError("геномы: ожидается таблица вид × ген")
+        with self._lock:
+            self.cfg.genomes = g
+            self.state["genomes"] = self.xp.asarray(g)
+        self.publish(force=True)
+
+    def set_world(self, **params):
+        """Изменить параметры мира. Те, что влияют на рельеф/засев, требуют
+        пересоздания — вызывающий решает через reset()."""
+        with self._lock:
+            for k, v in params.items():
+                if hasattr(self.cfg, k) and k != "genomes":
+                    setattr(self.cfg, k, type(getattr(self.cfg, k))(v))
+        self.publish(force=True)
+
     def set_rate(self, rate):
         self.rate = float(rate)
         self._wake.set()

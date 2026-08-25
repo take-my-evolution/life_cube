@@ -21,7 +21,7 @@ import threading
 
 import numpy as np
 
-from ...config import Config, SPECIES_NAMES
+from ...config import Config, SPECIES_COLORS, SPECIES_NAMES
 from ...engine import Engine
 from ...snapshot import Snapshot
 from ...sound import SoundMapper
@@ -44,6 +44,7 @@ def encode_snapshot(snap: Snapshot, first=False, sound=None) -> bytes:
     }
     if first:
         header["species_names"] = list(SPECIES_NAMES)[:len(snap.pops)]
+        header["config"] = getattr(snap, "config_json", None)
         relief = getattr(snap, "relief", None)
         header["relief"] = relief.astype(int).tolist() if relief is not None else None
     hb = json.dumps(header, ensure_ascii=False).encode()
@@ -132,6 +133,7 @@ class WebViewer:
         ws = web.WebSocketResponse(max_msg_size=64 * 1024 * 1024)
         await ws.prepare(request)
         snap = self.latest or self.engine.publish(force=True)
+        snap.config_json = self.engine.cfg.to_json()
         await ws.send_bytes(encode_snapshot(snap, first=True, sound=self.latest_sound))
         self.clients.add(ws)
         try:
@@ -168,8 +170,36 @@ class WebViewer:
             e.publish(force=True)
         elif c == "reset_sound":
             self.mapper = SoundMapper()
+        elif c == "genomes":
+            e.set_genomes(cmd["value"])
+            self._push_config()
+        elif c == "world":
+            params = dict(cmd.get("value") or {})
+            reseed = bool(cmd.get("reseed", True))
+            e.set_world(**params)
+            if reseed:
+                e.reset()
+            self.mapper = SoundMapper()
+            self._push_config()
+        elif c == "config":
+            self._push_config()
         else:
             raise ValueError(f"неизвестная команда {c!r}")
+
+    def _push_config(self):
+        """Разослать клиентам актуальный конфиг (геномы, мир) отдельным
+        текстовым сообщением — он меняется редко и в бинарный кадр не входит."""
+        if self.loop is None:
+            return
+        payload = json.dumps({"config": self.engine.cfg.to_json()}, ensure_ascii=False)
+
+        async def send():
+            for ws in list(self.clients):
+                try:
+                    await ws.send_str(payload)
+                except Exception:
+                    self.clients.discard(ws)
+        asyncio.run_coroutine_threadsafe(send(), self.loop)
 
     def make_app(self):
         from aiohttp import web

@@ -45,11 +45,15 @@ def build_world(cfg: Config, xp=np):
 
     xx, yy = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
 
-    # холмы и складки; последнее слагаемое — мелкая шероховатость
-    relief = (6 + 5 * np.sin(xx / 17.0) * np.cos(yy / 23.0)
-              + 3 * np.sin((xx + yy) / 11.0)
-              + rng.normal(0, 0.8, (n, n)))
-    relief = np.clip(relief, 3, max(4, n // 7)).astype(int)
+    # камень занимает stone_fraction высоты куба; холмы и складки вокруг этого
+    base = max(3.0, cfg.stone_fraction * n)
+    amp = cfg.relief_amp * base
+    relief = (base
+              + amp * 0.55 * np.sin(xx / (n / 7.5)) * np.cos(yy / (n / 5.5))
+              + amp * 0.30 * np.sin((xx + yy) / (n / 11.0))
+              + amp * 0.15 * np.sin(xx / (n / 23.0) + 2.0) * np.sin(yy / (n / 19.0))
+              + rng.normal(0, max(0.5, amp * 0.06), (n, n)))
+    relief = np.clip(relief, 2, n - 4).astype(int)
 
     zz = np.arange(n)[None, None, :]
     stone = zz < relief[:, :, None]
@@ -67,9 +71,27 @@ def build_world(cfg: Config, xp=np):
     k = int(seed_mask.sum())
     if k == 0:
         raise RuntimeError("засев пуст — подними seed_density")
-    # виды раздаются поровну: иначе исход решает случайность стартовых чисел
-    cycle = (np.arange(k) % len(cfg.genomes) + 1).astype(np.int8)
+
+    # растения и животные засеваются отдельно: животных обычно меньше, и они
+    # должны стартовать вперемешку с едой, а не сплошным пятном
+    mobile = cfg.mobile_mask()
+    plants = np.flatnonzero(~mobile) + 1
+    animals = np.flatnonzero(mobile) + 1
+    if len(animals) == 0 or cfg.animal_share <= 0:
+        cycle = (plants[np.arange(k) % len(plants)]).astype(np.int8)
+    else:
+        n_anim = int(round(k * cfg.animal_share))
+        cycle = np.concatenate([
+            plants[np.arange(k - n_anim) % max(len(plants), 1)],
+            animals[np.arange(n_anim) % len(animals)],
+        ]).astype(np.int8)
     rng.shuffle(cycle)
     species[seed_mask] = cycle
 
-    return xp.asarray(stone), xp.asarray(wet), xp.asarray(species), relief
+    energy = np.zeros((n, n, n), dtype=np.float32)
+    energy[species > 0] = cfg.plant_energy
+    anim_cells = np.isin(species, animals) if len(animals) else np.zeros_like(species, bool)
+    energy[anim_cells] = cfg.start_energy
+
+    return (xp.asarray(stone), xp.asarray(wet), xp.asarray(species),
+            relief, xp.asarray(energy))

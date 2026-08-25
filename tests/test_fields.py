@@ -40,10 +40,10 @@ def test_water_column_and_break():
 
 
 def test_resource_mix():
-    g = DEFAULT_GENOMES[2]     # теневой: water=0.85
+    g = DEFAULT_GENOMES[3]     # теневой: water=0.85
     L = np.array([1.0], np.float32); W = np.array([0.0], np.float32)
     r_light = resource(g, L, W, np)[0]
     r_water = resource(g, W, L, np)[0]
     assert r_water > r_light
-    g2 = DEFAULT_GENOMES[1]    # башня: water=0.25
+    g2 = DEFAULT_GENOMES[2]    # башня: water=0.25
     assert resource(g2, L, W, np)[0] > resource(g2, W, L, np)[0]

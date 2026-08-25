@@ -37,7 +37,8 @@ def test_lateral_water_flows_along_body_and_stops_at_gap():
 
 def _flat_world(n=16, branch=1.0, absorb=0.7, water=0.35):
     """Плоский камень, одна колонна вида 1 высотой 5. Возвращает state."""
-    g = np.array([[absorb, 1.5, 1.75, 0.40, water, branch]], np.float32)
+    g = np.zeros((1, 14), np.float32)
+    g[0, :6] = [absorb, 1.5, 1.75, 0.40, water, branch]
     cfg = Config(n=n, genomes=g, p_shock=0, p_dissolve=0, p_mutate=0, seed_density=0.01)
     xp, corr, _ = get_backend(False)
     state, _ = init_state(cfg, xp)
@@ -77,15 +78,15 @@ def test_branches_prefer_light_and_shade_below():
 
 
 def test_default_world_grows_trees_and_keeps_others():
-    cfg = Config(n=32, gens=40, seed_density=0.02)
+    cfg = Config(n=32, gens=40, seed_density=0.02, animal_share=0.0)
     from life_cube import run
     res = run(cfg, verbose=False)
     pops = res["hist"][-1]
-    assert cfg.n_species == 8 and pops[4] > 0          # дерево выжило
+    assert cfg.n_species == 8 and pops[5] > 0          # дерево выжило (вид 6)
     assert (pops > 0).sum() >= 3
     # у дерева есть клетки без опоры снизу — ветви
     sp = res["species"]; alive = sp > 0
     support = np.zeros_like(alive); support[:, :, 1:] = (alive | res["stone"] | res["soil"])[:, :, :-1]
-    hanging = (sp == 5) & ~support
+    hanging = (sp == 6) & ~support
     assert hanging.sum() > 0
-    assert hanging.sum() / max((sp == 5).sum(), 1) > 0.05
+    assert hanging.sum() / max((sp == 6).sum(), 1) > 0.05

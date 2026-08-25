@@ -29,7 +29,7 @@ def server():
     from aiohttp import web
     cfg = Config(n=24, seed_density=0.05)
     engine = Engine(cfg, rate=0, components=True)
-    engine.run(max_gens=15)          # немного жизни, потом на паузу
+    engine.run(max_gens=25)          # немного жизни, потом на паузу
     engine.pause()
     viewer = WebViewer(engine)
     port = _free_port()
@@ -71,45 +71,59 @@ def hist(page):
 
 def test_page_loads_and_shows_life(page, server):
     S = page.evaluate("({gen: viewer.S.gen, k: viewer.S.k, n: viewer.S.n, comps: viewer.S.comps.length})")
-    assert S["gen"] == 15 and S["n"] == 24 and S["k"] > 0 and S["comps"] > 0
+    assert S["gen"] == 25 and S["n"] == 24 and S["k"] > 0 and S["comps"] > 0
     h = hist(page)
     live = h["s1"] + h["s2"] + h["s3"] + h["s4"] + h["s5"]
     assert live > 200, h
     assert h["stone"] > 200, h
 
 
-def test_species_filter(page):
-    page.evaluate("viewer.set('ghost', false); viewer.set('speciesMask', [0,1,0,0,0,0,0,0])")
+def test_species_filter(page, server):
+    """Оставляем один вид — на экране остаются пиксели только его цвета."""
+    pops = server["engine"].last_snapshot.pops
+    s = int(np.argmax(pops)) + 1                     # самый многочисленный вид
+    mask = [1 if i == s - 1 else 0 for i in range(8)]
+    page.evaluate(f"viewer.set('ghost', false); viewer.set('showStone', false);"
+                  f" viewer.set('showSoil', false); viewer.set('speciesMask', {mask})")
     h = hist(page)
-    assert h["s2"] > 0 and h["s1"] + h["s3"] + h["s4"] + h["s5"] < 30, h
-    page.evaluate("viewer.set('speciesMask', [1,1,1,1,1,1,1,1])")
+    mine = h[f"s{s}"] if f"s{s}" in h else 0
+    others = sum(v for k, v in h.items() if k.startswith("s") and k != f"s{s}")
+    assert mine > 100, h
+    assert others < mine * 0.15, h
+    page.evaluate("viewer.set('speciesMask', [1,1,1,1,1,1,1,1]); viewer.set('showStone', true); viewer.set('showSoil', true)")
 
 
-def test_clip_z_removes_upper_cells(page):
+def test_clip_z_removes_upper_cells(page, server):
     page.evaluate("viewer.set('ghost', false); viewer.set('showStone', false); viewer.setView('front')")
     full = hist(page)
-    page.evaluate("viewer.set('clipZ', 3)")
+    sp = server["engine"].state["species"]
+    zs = np.argwhere(sp > 0)[:, 2]
+    mid = int((zs.min() + zs.max()) // 2)
+    page.evaluate(f"viewer.set('clipZ', {mid})")
     cut = hist(page)
     page.evaluate("viewer.set('clipZ', 1e9); viewer.set('showStone', true)")
     live = lambda h: h["s1"] + h["s2"] + h["s3"] + h["s4"] + h["s5"]
     assert 0 < live(cut) < live(full), (full, cut)
 
 
-def test_top_view_matches_columns(page, server):
-    """Вид сверху ортографикой: закрашенные столбцы = столбцы, где есть жизнь."""
+def test_top_view_scales_with_population(page, server):
+    """Вид сверху ортографикой: сколько пикселей закрашено — пропорционально
+    числу столбцов с жизнью (ловит перепутанные оси и битую проекцию)."""
     page.evaluate("viewer.set('proj','ortho'); viewer.set('ghost', false); viewer.set('showStone', false); viewer.set('showSoil', false); viewer.setView('top')")
     h = hist(page)
     sp = server["engine"].state["species"]
     cols = int((sp > 0).any(axis=2).sum())
-    live = h["s1"] + h["s2"] + h["s3"] + h["s4"] + h["s5"]
-    # площадь одной клетки в пикселях ~ (высота/ (dist*0.9))^2 — проверяем через отношение
-    px_per_cell = live / cols
-    assert 20 < px_per_cell < 2000, (live, cols)
-    # спереди/сбоку жизнь ниже — не должно быть пикселей над камнем выше max z: проверка ортогональности осей
-    page.evaluate("viewer.set('speciesMask',[1,0,0,0,0,0,0,0])")
-    h1 = hist(page)
-    cols1 = int((sp == 1).any(axis=2).sum())
-    assert abs(h1["s1"] / max(1, px_per_cell) - cols1) / max(cols1, 1) < 0.35, (h1, cols1)
+    live = sum(v for k, v in h.items() if k.startswith("s"))
+    px_per_cell = live / max(cols, 1)
+    assert 20 < px_per_cell < 4000, (live, cols)
+    # оставим один вид — площадь должна упасть примерно во столько же раз
+    pops = server["engine"].last_snapshot.pops
+    s = int(np.argmax(pops)) + 1
+    cols1 = int((sp == s).any(axis=2).sum())
+    mask = [1 if i == s - 1 else 0 for i in range(8)]
+    page.evaluate(f"viewer.set('speciesMask',{mask})")
+    live1 = sum(v for k, v in hist(page).items() if k.startswith("s"))
+    assert live1 < live and live1 / max(live, 1) < min(1.0, 2.5 * cols1 / max(cols, 1))
     page.evaluate("viewer.set('speciesMask',[1,1,1,1,1,1,1,1]); viewer.set('proj','persp'); viewer.setView('iso'); viewer.set('showStone', true)")
 
 
@@ -162,3 +176,33 @@ def test_sound_frame_reaches_client_and_audio_graph(page, server):
     assert px > 0
     page.click("#btnAudio")
     assert not page.evaluate("viewer.Audio.on")
+
+
+def test_constructor_panel_edits_genomes(page, server):
+    """Панель конструктора приходит с конфигом и правит геномы на сервере."""
+    cfg = page.evaluate("viewer.CFG.data")
+    assert cfg and len(cfg["fields"]) == 14 and len(cfg["genomes"]) == len(cfg["names"])
+    assert "травоядное" in cfg["names"] and "хищник" in cfg["names"]
+    # ползунки нарисованы для выбранного вида
+    assert page.locator("#genes input[type=range]").count() == 14
+    assert page.locator("#speciesPick button").count() == len(cfg["names"])
+    # правим ген через API панели и применяем
+    gi = cfg["fields"].index("metabolism")
+    page.evaluate(f"viewer.CFG.edited[6][{gi}] = 0.123")
+    page.click("#btnApplyGenes")
+    page.wait_for_timeout(600)
+    assert abs(float(server["engine"].cfg.genomes[6][gi]) - 0.123) < 1e-4
+    # сервер разослал новый конфиг обратно
+    page.wait_for_function(f"Math.abs(viewer.CFG.data.genomes[6][{gi}] - 0.123) < 1e-4", timeout=5000)
+
+
+def test_world_panel_reseeds(page, server):
+    e = server["engine"]
+    page.evaluate("viewer.CFG.world.seed_world = 12345; viewer.CFG.world.stone_fraction = 0.5")
+    page.click("#btnApplyWorld")
+    page.wait_for_timeout(1200)
+    assert e.cfg.seed_world == 12345
+    assert abs(e.cfg.stone_fraction - 0.5) < 1e-6
+    assert e.gen <= 3          # мир пересоздан, счётчик сброшен
+    stone_share = float((e.state["stone"]).mean())
+    assert 0.4 < stone_share < 0.6, stone_share

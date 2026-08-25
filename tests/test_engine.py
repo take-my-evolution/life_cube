@@ -64,7 +64,7 @@ def test_protocol_roundtrip():
     assert hdr["gen"] == 3 and hdr["n"] == 16 and hdr["k"] == len(snap.coords)
     assert np.array_equal(coords, snap.coords) and np.array_equal(species, snap.species)
     assert np.array_equal(labels, snap.labels)
-    assert len(hdr["relief"]) == 16 and hdr["species_names"][0] == "корка"
+    assert len(hdr["relief"]) == 16 and hdr["species_names"][0] == "мох"
     assert len(hdr["components"]) == len(snap.components)
     # во втором кадре рельефа нет — экономим
     assert "relief" not in decode_snapshot(encode_snapshot(snap))[0]

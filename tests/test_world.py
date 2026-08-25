@@ -28,21 +28,30 @@ def test_world_deterministic_and_seeded():
     assert not np.array_equal(a[3], c[3])       # другой сид — другой рельеф
 
 
+def test_stone_fraction_controls_relief():
+    for frac in (0.15, 0.33, 0.5):
+        cfg = Config(n=48, stone_fraction=frac, seed_density=0.02)
+        stone = build_world(cfg, np)[0]
+        assert abs(stone.mean() - frac) < 0.08, (frac, stone.mean())
+
+
 def test_world_layout():
     cfg = Config(n=32)
-    stone, wet, species, relief = build_world(cfg, np)
+    stone, wet, species, relief, energy = build_world(cfg, np)
     n = cfg.n
     assert stone.shape == species.shape == (n, n, n)
     assert wet.shape == relief.shape == (n, n)
-    assert relief.min() >= 3 and relief.max() <= max(4, n // 7)
+    assert relief.min() >= 2 and abs(relief.mean() - cfg.stone_fraction * n) < cfg.relief_amp * cfg.stone_fraction * n
     assert 0.15 <= wet.min() and wet.max() <= 1.0
     # споры лежат ровно на первом слое над камнем и не в камне
     assert not (stone & (species > 0)).any()
     xs, ys, zs = np.nonzero(species)
     assert np.array_equal(zs, relief[xs, ys])
-    # все четыре вида представлены примерно поровну
+    # представлены и растения, и животные; энергия расставлена
     counts = np.bincount(species[species > 0], minlength=cfg.n_species + 1)[1:]
-    assert (counts > 0).all() and counts.max() - counts.min() <= 1
+    mobile = cfg.mobile_mask()
+    assert counts[~mobile].sum() > 0 and counts[mobile].sum() > 0
+    assert energy[species > 0].min() > 0
 
 
 def test_empty_seed_raises():

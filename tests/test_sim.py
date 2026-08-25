@@ -47,8 +47,9 @@ def test_reproducible_and_seeds_independent():
 def test_step_no_lonely_death_and_crowd_death():
     """Одиночка не умирает от одиночества; давка убивает."""
     from life_cube.config import DEFAULT_GENOMES
-    plants = DEFAULT_GENOMES[DEFAULT_GENOMES[:, 6] == 0]      # без хищников:
-    # хищник без добычи голодает и умирает — это отдельная механика (test_predation)
+    from life_cube.config import IDX
+    plants = DEFAULT_GENOMES[DEFAULT_GENOMES[:, IDX["speed"]] == 0]   # только растения:
+    # животные ходят и голодают — это отдельная механика (test_motion)
     cfg = Config(n=12, p_shock=0.0, p_dissolve=0.0, p_mutate=0.0, seed_density=0.05,
                  genomes=plants)
     xp, correlate, _ = get_backend(False)

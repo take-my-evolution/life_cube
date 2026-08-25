@@ -33,6 +33,13 @@
   #waterfall { width:100%; height:96px; background:#0d0f14; border:1px solid var(--line); image-rendering:pixelated; }
   .muted { color:var(--dim); }
   #status { color:var(--dim); font-size:11px; }
+  .gene { display:grid; grid-template-columns: 1fr 54px; gap:4px; align-items:center; margin:2px 0; }
+  .gene span { font-size:11px; color:var(--dim); }
+  .gene input[type=range] { grid-column: 1 / span 2; margin:0; }
+  .gene b { font-weight:normal; font-size:11px; text-align:right; }
+  .pick { padding:2px 6px; font-size:11.5px; }
+  .pick.on { background:#2ec7b8; color:#000; }
+  .dim { opacity:.35; }
 </style>
 </head>
 <body>
@@ -65,6 +72,23 @@
     голоса <input id="mixV" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.6">
     шум <input id="mixN" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.3"></div>
   <canvas id="waterfall" title="спектр-водопад: 64 полосы куба снизу вверх, время слева направо"></canvas>
+
+  <h3>Конструктор существ</h3>
+  <div class="row" id="speciesPick"></div>
+  <div id="genes"></div>
+  <div class="row">
+    <button id="btnApplyGenes">Применить</button>
+    <button id="btnResetGenes">Вернуть исходные</button>
+  </div>
+  <div class="row muted" id="geneHint">Геном применяется на лету, мир не пересоздаётся.</div>
+
+  <h3>Мир и засев</h3>
+  <div id="world"></div>
+  <div class="row">
+    <button id="btnApplyWorld">Пересоздать мир</button>
+    <button id="btnRandomSeed">Случайный сид</button>
+  </div>
+  <div class="row"><button id="btnExport">Скопировать пресет</button> <button id="btnImport">Вставить пресет</button></div>
 
   <h3>Проекция</h3>
   <div class="row">
@@ -304,7 +328,7 @@ $('showSoil').onchange = e=>{ S.showSoil=e.target.checked; dirty=true; };
 $('btnClearSel').onclick = ()=>{ S.selected=0; renderTable(); dirty=true; };
 function buildSpeciesBox(){ const box=$('speciesBox'); box.innerHTML='';
   for (let s=1;s<=S.nsp;s++){ const l=document.createElement('label'); l.className='sp';
-    const c=COL[s].map(v=>Math.round(v*255)); l.innerHTML=`<input type="checkbox" checked data-sp="${s}"><span class="sw" style="background:rgb(${c})"></span>${S.names[s-1]||s}`;
+    const c=(COL[s]||[1,1,1]).map(v=>Math.round(v*255)); l.innerHTML=`<input type="checkbox" ${S.speciesMask[s-1]?'checked':''} data-sp="${s}"><span class="sw" style="background:rgb(${c})"></span>${S.names[s-1]||s}`;
     l.querySelector('input').onchange=e=>{ S.speciesMask[s-1]=e.target.checked?1:0; dirty=true; }; box.appendChild(l); } }
 function renderTable(){ const tb=$('comps').querySelector('tbody'); tb.innerHTML='';
   $('compCount').textContent = `(${S.comps.length})`;
@@ -332,6 +356,7 @@ function applyFrame(buf){
   S.paused=hdr.paused; S.rate=hdr.rate; S.measured=hdr.measured_rate;
   if (hdr.relief){ S.relief=hdr.relief; }
   if (hdr.species_names) { S.names=hdr.species_names; S.nsp=hdr.species_names.length; buildSpeciesBox(); }
+  if (hdr.config) applyConfig(hdr.config);
   if (S.n!==hdr.n || firstFrame){ S.n=hdr.n; S.target=[S.n/2,S.n/2,S.n/6]; S.dist=S.n*1.9; S.clipZ=S.n;
     $('clipZ').max=S.n; $('clipZ').value=S.n; $('clipLbl').textContent=S.n; $('slab').max=S.n;
     if (firstFrame){ $('rate').value=Math.log10(Math.max(0.1,S.rate||10)); $('rateLbl').textContent=(S.rate||0).toFixed(1)+' пок/с'; }
@@ -344,11 +369,93 @@ function applyFrame(buf){
 function connect(){
   const url=(location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws';
   ws=new WebSocket(url); ws.binaryType='arraybuffer';
-  ws.onmessage=e=>{ if (typeof e.data==='string'){ $('status').textContent=e.data; return; } applyFrame(e.data); };
+  ws.onmessage=e=>{ if (typeof e.data==='string'){
+      try { const m=JSON.parse(e.data); if (m.config){ applyConfig(m.config); $('status').textContent='конфиг обновлён'; return; }
+            if (m.error){ $('status').textContent='ошибка: '+m.error; return; } } catch(err){}
+      $('status').textContent=e.data; return; }
+    applyFrame(e.data); };
   ws.onopen=()=>{ $('status').textContent='подключено'; };
   ws.onclose=()=>{ $('status').textContent='нет связи, переподключение…'; S.connected=false; setTimeout(connect,1500); };
 }
 if (location.protocol!=='file:') connect();
+
+// --------------------------------------------------- конструктор существ
+const CFG = { data: null, pick: 1, edited: null, initial: null };
+const PLANT_GENES = new Set(["absorb","up","birth","need","water","branch"]);
+const ANIMAL_GENES = new Set(["hunt","speed","sense","metabolism","repro","lifespan","armor"]);
+
+function speciesButtons(){
+  const box=$('speciesPick'); box.innerHTML='';
+  CFG.data.names.forEach((nm,i)=>{
+    const b=document.createElement('button'); b.className='pick'+(i+1===CFG.pick?' on':'');
+    const c=CFG.data.colors[i]||'#888';
+    b.innerHTML=`<span class="sw" style="background:${c}"></span> ${nm}`;
+    b.onclick=()=>{ CFG.pick=i+1; speciesButtons(); geneSliders(); };
+    box.appendChild(b);
+  });
+}
+function geneSliders(){
+  const box=$('genes'); box.innerHTML='';
+  const g=CFG.edited[CFG.pick-1], f=CFG.data.fields;
+  const mobile = g[f.indexOf('speed')] > 0;
+  f.forEach((name,gi)=>{
+    const [lo,hi,st]=CFG.data.ranges[name]||[0,1,0.01];
+    const row=document.createElement('div'); row.className='gene';
+    // гены, которые для этого существа не работают, показываем приглушённо
+    const useless = (mobile && PLANT_GENES.has(name)) || (!mobile && ANIMAL_GENES.has(name) && name!=='hunt');
+    if (useless) row.classList.add('dim');
+    row.innerHTML=`<span>${CFG.data.labels[name]||name}</span><b id="gv${gi}">${(+g[gi]).toFixed(st<0.05?2:(st<1?1:0))}</b>`;
+    const inp=document.createElement('input'); inp.type='range'; inp.min=lo; inp.max=hi; inp.step=st; inp.value=g[gi];
+    inp.oninput=e=>{ CFG.edited[CFG.pick-1][gi]=+e.target.value; $('gv'+gi).textContent=(+e.target.value).toFixed(st<0.05?2:(st<1?1:0));
+      if (name==='speed') geneSliders(); };
+    row.appendChild(inp); box.appendChild(row);
+  });
+}
+const WORLD_LABELS = { n:'размер куба (нужен пересоздание)', seed_world:'сид мира', seed_mut:'сид мутаций',
+  seed_density:'плотность засева', animal_share:'доля животных в засеве', stone_fraction:'доля камня по высоте',
+  relief_amp:'размах рельефа', p_shock:'выветривание', p_dissolve:'растворение камня',
+  plant_energy:'энергия клетки растения', eat_efficiency:'усвоение добычи', move_noise:'шум в движении' };
+const WORLD_RANGES = { n:[32,320,32], seed_density:[0.001,0.05,0.001], animal_share:[0,0.9,0.02],
+  stone_fraction:[0.05,0.7,0.01], relief_amp:[0,1.2,0.05], p_shock:[0,0.02,0.0002], p_dissolve:[0,0.02,0.0002],
+  plant_energy:[0.1,5,0.1], eat_efficiency:[0.1,1,0.05], move_noise:[0,1,0.05] };
+function worldControls(){
+  const box=$('world'); box.innerHTML=''; const w=CFG.data.world;
+  for (const k of Object.keys(w)){
+    const row=document.createElement('div'); row.className='gene';
+    if (k==='seed_world'||k==='seed_mut'){
+      row.innerHTML=`<span>${WORLD_LABELS[k]}</span>`;
+      const inp=document.createElement('input'); inp.type='number'; inp.value=w[k]; inp.style.width='90px';
+      inp.oninput=e=>{ CFG.world[k]=+e.target.value; }; row.appendChild(inp); box.appendChild(row); continue;
+    }
+    const [lo,hi,st]=WORLD_RANGES[k]||[0,1,0.01];
+    const dec = st<0.001?4:(st<0.05?3:(st<1?2:0));
+    row.innerHTML=`<span>${WORLD_LABELS[k]||k}</span><b id="wv_${k}">${(+w[k]).toFixed(dec)}</b>`;
+    const inp=document.createElement('input'); inp.type='range'; inp.min=lo; inp.max=hi; inp.step=st; inp.value=w[k];
+    inp.oninput=e=>{ CFG.world[k]=+e.target.value; $('wv_'+k).textContent=(+e.target.value).toFixed(dec); };
+    row.appendChild(inp); box.appendChild(row);
+  }
+}
+function applyConfig(cfg){
+  CFG.data=cfg;
+  if (!CFG.initial) CFG.initial=JSON.parse(JSON.stringify(cfg.genomes));
+  CFG.edited=JSON.parse(JSON.stringify(cfg.genomes));
+  CFG.world=Object.assign({}, cfg.world);
+  S.names=cfg.names; S.nsp=cfg.names.length;
+  cfg.colors.forEach((hex,i)=>{ COL[i+1]=[1,3,5].map(k=>parseInt(hex.slice(k,k+2),16)/255); });
+  for (let i=0;i<9;i++) gl.uniform3fv(gl.getUniformLocation(prog, `uCol[${i}]`), COL[i]||[1,1,1]);
+  buildSpeciesBox(); speciesButtons(); geneSliders(); worldControls(); dirty=true;
+}
+$('btnApplyGenes').onclick=()=>send({cmd:'genomes', value:CFG.edited});
+$('btnResetGenes').onclick=()=>{ CFG.edited=JSON.parse(JSON.stringify(CFG.initial)); geneSliders(); send({cmd:'genomes', value:CFG.edited}); };
+$('btnApplyWorld').onclick=()=>send({cmd:'world', value:CFG.world, reseed:true});
+$('btnRandomSeed').onclick=()=>{ CFG.world.seed_world=Math.floor(Math.random()*1e9); CFG.world.seed_mut=Math.floor(Math.random()*1e9);
+  worldControls(); send({cmd:'world', value:CFG.world, reseed:true}); };
+$('btnExport').onclick=async()=>{ const t=JSON.stringify({genomes:CFG.edited, world:CFG.world});
+  try { await navigator.clipboard.writeText(t); $('status').textContent='пресет скопирован'; } catch(e){ prompt('пресет:', t); } };
+$('btnImport').onclick=()=>{ const t=prompt('вставь пресет JSON:'); if(!t) return;
+  try { const o=JSON.parse(t); if(o.genomes){ CFG.edited=o.genomes; send({cmd:'genomes', value:o.genomes}); }
+    if(o.world){ CFG.world=o.world; worldControls(); send({cmd:'world', value:o.world, reseed:true}); } geneSliders(); }
+  catch(e){ $('status').textContent='не разобрал пресет: '+e.message; } };
 
 // ------------------------------------------------------------------ звук
 // Бэкенд Web Audio по SoundFrame (hdr.sound). Модель та же, что в sound/synth.py:
@@ -444,12 +551,13 @@ const WF = { canvas: $('waterfall'), col: 0, w: 240, h: 64, ctx: null, img: null
 
 // --------------------------------------------- API для тестов и скриптов
 window.viewer = {
-  S, gl, applyFrame, Audio, WF, draw: ()=>{ dirty=false; draw(); },
+  S, gl, applyFrame, Audio, WF, CFG, draw: ()=>{ dirty=false; draw(); },
   set(k,v){ S[k]=v; dirty=true; }, setView(v){ setView(v); dirty=true; },
   readPixels(){ resize(); draw(); const w=canvas.width,h=canvas.height; const px=new Uint8Array(w*h*4); gl.readPixels(0,0,w,h,gl.RGBA,gl.UNSIGNED_BYTE,px); return {w,h,px}; },
   // подсчёт пикселей по ближайшему цвету вида (для тестов): возвращает {bg, stone, s1..s4, other}
-  histogram(){ const {w,h,px}=this.readPixels(); const out={bg:0,stone:0,s1:0,s2:0,s3:0,s4:0,s5:0,other:0};
-    const refs=[['bg',[13,15,20]],['stone',[59,61,74]],['s1',COL[1].map(v=>v*255)],['s2',COL[2].map(v=>v*255)],['s3',COL[3].map(v=>v*255)],['s4',COL[4].map(v=>v*255)],['s5',COL[5].map(v=>v*255)]];
+  histogram(){ const {w,h,px}=this.readPixels(); const out={bg:0,stone:0,other:0};
+    const refs=[['bg',[13,15,20]],['stone',[59,61,74]]];
+    for (let i=1;i<=MAXSP;i++){ out['s'+i]=0; if (COL[i]) refs.push(['s'+i, COL[i].map(v=>v*255)]); }
     for(let i=0;i<w*h*4;i+=4){ const r=px[i],g=px[i+1],b=px[i+2]; let best='other',bd=1e9;
       for(const [nm,c] of refs){ // сравниваем оттенок с поправкой на освещение: направление вектора цвета
         const l1=Math.hypot(r,g,b)||1, l2=Math.hypot(...c)||1; const d=1-(r*c[0]+g*c[1]+b*c[2])/(l1*l2);
