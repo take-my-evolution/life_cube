@@ -21,8 +21,9 @@ import threading
 
 import numpy as np
 
-from ...config import Config, SPECIES_COLORS, SPECIES_NAMES
+from ...config import Config
 from ...engine import Engine
+from ...engines import get_rules, list_engines
 from ...snapshot import Snapshot
 from ...sound import SoundMapper
 
@@ -45,9 +46,15 @@ def encode_snapshot(snap: Snapshot, first=False, sound=None) -> bytes:
                        for c in snap.components],
         "hist_tail": [list(map(int, h)) for h in getattr(snap, "hist", [])[-400:]],
     }
+    dyn = getattr(snap, "dynamic_species", False)
+    if first or dyn:
+        # у движков с динамическими видами имена/цвета меняются — шлём всегда
+        header["species_names"] = list(getattr(snap, "species_names", []))[:len(snap.pops)]
+        header["species_colors"] = list(getattr(snap, "species_colors", []))[:len(snap.pops)]
     if first:
-        header["species_names"] = list(SPECIES_NAMES)[:len(snap.pops)]
         header["config"] = getattr(snap, "config_json", None)
+        header["engines"] = list_engines()
+    if first or getattr(snap, "relief_dirty", False):
         relief = getattr(snap, "relief", None)
         header["relief"] = relief.astype(int).tolist() if relief is not None else None
     hb = json.dumps(header, ensure_ascii=False).encode()
@@ -146,7 +153,7 @@ class WebViewer:
         ws = web.WebSocketResponse(max_msg_size=64 * 1024 * 1024)
         await ws.prepare(request)
         snap = self.latest or self.engine.publish(force=True)
-        snap.config_json = self.engine.cfg.to_json()
+        snap.config_json = self.engine.rules.to_json(self.engine.cfg, self.engine.state)
         await ws.send_bytes(encode_snapshot(snap, first=True, sound=self.latest_sound))
         self.clients.add(ws)
         try:
@@ -182,18 +189,32 @@ class WebViewer:
         elif c == "rate":
             e.set_rate(float(cmd.get("value", 0)))
         elif c == "reset":
-            old = e.cfg
-            cfg = Config(n=old.n, gens=old.gens,
-                         seed_world=int(cmd.get("seed_world", old.seed_world)),
-                         seed_mut=int(cmd.get("seed_mut", old.seed_mut)),
-                         seed_density=old.seed_density, genomes=old.genomes)
-            e.reset(cfg)
+            e.set_world(seed_world=int(cmd.get("seed_world", e.cfg.seed_world)),
+                        seed_mut=int(cmd.get("seed_mut", e.cfg.seed_mut)))
+            e.reset()
         elif c == "snapshot":
             e.publish(force=True)
         elif c == "reset_sound":
             self.mapper = SoundMapper()
         elif c == "genomes":
-            e.set_genomes(cmd["value"])
+            e.set_genomes(cmd["value"], ids=cmd.get("ids"))
+            self._push_config()
+        elif c == "randomize":
+            e.randomize(seed=cmd.get("seed"))
+            self.mapper = SoundMapper()
+            self._push_config()
+        elif c == "restart":
+            e.reset()
+            self.mapper = SoundMapper()
+            self._push_config()
+        elif c == "engine":
+            name = str(cmd.get("value"))
+            n = int(cmd.get("n", e.cfg.n))
+            if n > self.MAX_N:
+                raise ValueError(f"предел {self.MAX_N}³")
+            rules = get_rules(name)
+            e.switch_rules(name, rules.Config(n=n))
+            self.mapper = SoundMapper()
             self._push_config()
         elif c == "world":
             params = dict(cmd.get("value") or {})
@@ -219,7 +240,8 @@ class WebViewer:
         текстовым сообщением — он меняется редко и в бинарный кадр не входит."""
         if self.loop is None:
             return
-        payload = json.dumps({"config": self.engine.cfg.to_json()}, ensure_ascii=False)
+        payload = json.dumps({"config": self.engine.rules.to_json(self.engine.cfg, self.engine.state)},
+                             ensure_ascii=False)
 
         async def send():
             for ws in list(self.clients):
@@ -245,21 +267,22 @@ class WebViewer:
         return app
 
 
-def serve(cfg: Config, use_gpu=False, host="0.0.0.0", port=8765, rate=0.0,
+def serve(cfg=None, use_gpu=False, host="0.0.0.0", port=8765, rate=0.0,
           snapshot_every=0, components=True, autostart=True, fps=25.0,
-          components_hz=2.0, yield_ms=0.5, max_n=256, max_cells=400_000):
+          components_hz=2.0, yield_ms=0.5, max_n=256, max_cells=400_000,
+          rules="ecology"):
     """Поднять движок в фоновом потоке и веб-сервер в текущем."""
     from aiohttp import web
     engine = Engine(cfg, use_gpu=use_gpu, rate=rate,
                     snapshot_every=snapshot_every, components=components,
-                    yield_ms=yield_ms, max_cells=max_cells)
+                    yield_ms=yield_ms, max_cells=max_cells, rules=rules)
     if not autostart:
         engine.pause()
     viewer = WebViewer(engine, fps=fps, components_hz=components_hz, max_n=max_n)
     th = threading.Thread(target=engine.run, daemon=True, name="life-cube-sim")
     th.start()
     print(f"life-cube web viewer: http://{host}:{port}/  "
-          f"(куб {cfg.n}³, {'GPU' if engine.on_gpu else 'CPU'})", flush=True)
+          f"(движок {engine.rules.name}, куб {engine.cfg.n}³, {'GPU' if engine.on_gpu else 'CPU'})", flush=True)
     try:
         web.run_app(viewer.make_app(), host=host, port=port, print=None)
     finally:

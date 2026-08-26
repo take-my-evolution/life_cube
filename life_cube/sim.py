@@ -52,6 +52,7 @@ def run(cfg: Config, use_gpu: bool = False, verbose: bool = True,
     return {
         "species": to_cpu(state["species"]),
         "energy": to_cpu(state["energy"]),
+        "age": to_cpu(state["age"]),
         "stone": to_cpu(state["stone"]),
         "soil": to_cpu(state["soil"]),
         "relief": relief,

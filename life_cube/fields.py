@@ -33,7 +33,12 @@ def _spread_lateral(W, alive, steps, decay, xp):
         nb[:-1, :, :] = xp.maximum(nb[:-1, :, :], W[1:, :, :])
         nb[:, 1:, :] = xp.maximum(nb[:, 1:, :], W[:, :-1, :])
         nb[:, :-1, :] = xp.maximum(nb[:, :-1, :], W[:, 1:, :])
-        W = xp.where(alive, xp.maximum(W, nb * decay), W)
+        W2 = xp.where(alive, xp.maximum(W, nb * decay), W)
+        # ранний выход: если вода больше никуда не дотекла, дальше смысла нет
+        # (одна синхронизация с GPU на итерацию — дешевле лишних проходов)
+        if not bool((W2 > W).any()):
+            return W2
+        W = W2
     return W
 
 

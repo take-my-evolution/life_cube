@@ -68,7 +68,7 @@ def test_branches_prefer_light_and_shade_below():
     alive = sp > 0
     support = np.zeros_like(alive); support[:, :, 1:] = (alive | state["stone"] | state["soil"])[:, :, :-1]
     hanging = alive & ~support                      # ветви: висят без опоры снизу
-    assert hanging.sum() >= 20
+    assert hanging.sum() >= 12
     assert hanging[:, :, 5:].sum() > hanging[:, :, 3:5].sum()   # ярус кроны выше земли
     # под кроной свет ослаблен, на открытом месте — полный
     absorb = np.where(alive, cfg.genomes[0][0], 0).astype(np.float32)
@@ -90,3 +90,46 @@ def test_default_world_grows_trees_and_keeps_others():
     hanging = (sp == 6) & ~support
     assert hanging.sum() > 0
     assert hanging.sum() / max((sp == 6).sum(), 1) > 0.05
+
+
+def test_detached_tissue_dies():
+    """Регрессия: крона, оторванная от ствола, не должна висеть в воздухе."""
+    state, cfg, xp, corr = _flat_world(branch=1.2)
+    for _ in range(12):
+        step(state, cfg, xp, corr)
+    sp = state["species"]
+    # рубим всё на высоте z=4: всё, что выше, теряет связь с землёй
+    sp[:, :, 4] = 0
+    above0 = int((sp[:, :, 5:] > 0).sum())
+    assert above0 > 0
+    for _ in range(3):
+        step(state, cfg, xp, corr)
+    above = int((state["species"][:, :, 5:] > 0).sum())
+    assert above == 0, above
+
+
+def test_default_world_has_no_persistent_floating_plants():
+    """Оторванные клетки могут существовать не дольше двух поколений:
+    одно — пока вода «не заметила» гибель опоры, одно — льгота новорождённым."""
+    cfg = Config(n=32, gens=80, seed_density=0.02, animal_share=0.0)
+    from life_cube.backend import get_backend
+    from life_cube.sim import init_state
+    from life_cube.fields import water_field
+    xp, corr, _ = get_backend(False)
+    state, _ = init_state(cfg, xp)
+    for _ in range(80):
+        step(state, cfg, xp, corr)
+
+    def floaters(st):
+        alive = st["species"] > 0
+        W = water_field(alive, st["stone"], st["soil"], st["wet"], cfg, np)
+        return alive & (W == 0)
+
+    cont = floaters(state)
+    sp0 = state["species"].copy()
+    assert cont.sum() > 0                    # на кромке всегда кто-то оторван
+    for _ in range(3):
+        step(state, cfg, xp, corr)
+        # та же клетка (вид не сменился, не перерождалась) и всё ещё висит
+        cont = cont & (state["species"] == sp0) & (state["age"] >= 1) & floaters(state)
+    assert cont.sum() == 0, int(cont.sum())

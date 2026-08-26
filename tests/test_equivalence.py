@@ -43,7 +43,7 @@ def test_plant_step_matches_legacy():
     g = np.zeros((4, len(GENOME_FIELDS)), np.float32)
     g[:, :5] = lcfg.genomes
     cfg = Config(n=n, gens=gens, seed_density=0.02, genomes=g,
-                 lateral_decay=0.0, animal_share=0.0)
+                 lateral_decay=0.0, animal_share=0.0, require_substrate=False)
     xp, corr, _ = get_backend(False)
     state, _ = init_state(cfg, xp)
     state.update({"species": species.copy(), "stone": stone.copy(),

@@ -92,6 +92,17 @@ def step(state: dict, cfg: Config, xp, correlate, gen: int = 0):
 
     survive = alive & (nb < cfg.crowd_max) & (Rlive > need)
 
+    # --- связь с подложкой: оторванная ткань гибнет ---
+    # Вода доходит только по непрерывному телу от камня/почвы, поэтому W == 0
+    # означает «нет связи с землёй». Раньше такие клетки жили на одном свете
+    # и висели в воздухе (кроны деревьев после гибели ствола) — баг.
+    # Новорождённой клетке (age == 0) даётся одно поколение: вода до неё
+    # дотечёт на следующем проходе, иначе кромка роста мерцала бы.
+    if cfg.require_substrate:
+        age = state.get("age")
+        newborn = (age == 0) if age is not None else False
+        survive = survive & ((W > 0) | newborn)
+
     # --- мутация при делении: пока просто смена вида (в пределах растений) ---
     if plant_ids:
         mut = born & (rng.random(species.shape) < cfg.p_mutate)
@@ -120,6 +131,12 @@ def step(state: dict, cfg: Config, xp, correlate, gen: int = 0):
         energy = xp.where(born, xp.float32(cfg.plant_energy), energy)
         energy = xp.where(new_species == 0, xp.float32(0), energy)
         state["energy"] = energy
+    age = state.get("age")
+    if age is not None:
+        # возраст растений: новорождённые 0, остальные +1 (животных считает motion)
+        age = xp.where(born, xp.int32(0), xp.where(alive & (new_species > 0), age + 1, age))
+        age = xp.where(new_species == 0, xp.int32(0), age)
+        state["age"] = age
 
     state["species"], state["stone"], state["soil"] = new_species, stone, soil
 

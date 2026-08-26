@@ -10,9 +10,8 @@ import time
 
 from .backend import get_backend, to_cpu
 from .config import Config
-from .sim import init_state
+from .engines import get_rules
 from .snapshot import Tracker, make_snapshot
-from .step import step
 
 
 class Engine:
@@ -20,12 +19,13 @@ class Engine:
     # секунды и душит и симуляцию, и веб-сервер: отключаем её автоматически
     COMPONENTS_CELL_LIMIT = 6_000_000
 
-    def __init__(self, cfg: Config, use_gpu=False, rate=10.0,
+    def __init__(self, cfg: Config = None, use_gpu=False, rate=10.0,
                  snapshot_every=1, components=True, yield_ms=0.5,
-                 max_cells=400_000):
-        self.cfg = cfg
+                 max_cells=400_000, rules="ecology"):
+        self.rules = get_rules(rules) if isinstance(rules, str) else rules
+        self.cfg = cfg if cfg is not None else self.rules.Config()
         self.xp, self.correlate, self.on_gpu = get_backend(use_gpu)
-        self.state, self.relief = init_state(cfg, self.xp)
+        self.state, self.relief = self.rules.init_state(self.cfg, self.xp)
         self.gen = 0
         self.rate = float(rate)          # целевых поколений/с; <=0 — без предела
         # без предела скорости поток симуляции не отдаёт GIL и душит веб-сервер:
@@ -61,18 +61,30 @@ class Engine:
             self._step_request += 1
         self._wake.set()
 
-    def set_genomes(self, genomes):
-        """Заменить геномы на лету, не трогая мир. Если менялось число видов
-        или подвижность — состояние остаётся, роли пересчитаются на следующем
-        шаге."""
-        import numpy as np
-        g = np.asarray(genomes, dtype=np.float32)
-        if g.ndim != 2:
-            raise ValueError("геномы: ожидается таблица вид × ген")
+    def set_genomes(self, genomes, ids=None):
+        """Заменить геномы на лету, не трогая мир."""
         with self._lock:
-            self.cfg.genomes = g
-            self.state["genomes"] = self.xp.asarray(g)
+            if ids is not None:
+                self.rules.apply_genomes(self.cfg, self.state, genomes, self.xp, ids=ids)
+            else:
+                self.rules.apply_genomes(self.cfg, self.state, genomes, self.xp)
         self.publish(force=True)
+
+    def randomize(self, seed=None):
+        """Случайные гены (по правилам движка) + пересоздание мира."""
+        import numpy as np
+        rng = np.random.default_rng(seed)
+        with self._lock:
+            self.cfg.genomes = self.rules.randomize(self.cfg, rng)
+        self.reset()
+
+    def switch_rules(self, name, cfg=None):
+        """Сменить движок: новый Config по умолчанию (или переданный) и новый мир."""
+        rules = get_rules(name)
+        with self._lock:
+            self.rules = rules
+            self.cfg = cfg if cfg is not None else rules.Config(n=self.cfg.n)
+        self.reset()
 
     def set_world(self, **params):
         """Изменить параметры мира. Те, что влияют на рельеф/засев, требуют
@@ -90,7 +102,7 @@ class Engine:
     def on_snapshot(self, fn):
         self.listeners.append(fn)
 
-    def reset(self, cfg: Config = None):
+    def reset(self, cfg=None):
         with self._lock:
             if cfg is not None:
                 self.cfg = cfg
@@ -102,7 +114,7 @@ class Engine:
                     self.xp.get_default_memory_pool().free_all_blocks()
                 except Exception:
                     pass
-            self.state, self.relief = init_state(self.cfg, self.xp)
+            self.state, self.relief = self.rules.init_state(self.cfg, self.xp)
             self.gen = 0
             self.hist = []
             self.tracker = Tracker() if self.components else None
@@ -111,7 +123,7 @@ class Engine:
     # --- шаг ----------------------------------------------------------------
     def advance(self):
         with self._lock:
-            pops = step(self.state, self.cfg, self.xp, self.correlate, self.gen)
+            pops = self.rules.step(self.state, self.cfg, self.xp, self.correlate, self.gen)
             self.gen += 1
             self.hist.append(pops)
         return pops
@@ -129,16 +141,26 @@ class Engine:
             cpu = {"species": to_cpu(self.state["species"]).copy(),
                    "soil": to_cpu(self.state["soil"]).copy()}
             hist = list(self.hist)
+            n_species = self.rules.n_species(self.cfg)
         want = self.components if components is None else (components and self.components)
         if want and self.cfg.n ** 3 > self.COMPONENTS_CELL_LIMIT:
             want = False                    # слишком большой мир — без разметки
         snap = make_snapshot(cpu, gen, self.cfg, self.tracker,
-                             with_components=want)
+                             with_components=want, n_species=n_species)
         if not want and self.last_snapshot is not None:
             # переиспользуем прошлую разметку организмов: она обновляется реже
             snap.components = self.last_snapshot.components
+        # у движков с меняющимся рельефом карту высот обновляем в каждом снимке
+        if getattr(self.rules, "terrain_changes", False):
+            self.relief = to_cpu(self.state["stone_h"]).copy()
+            snap.relief_dirty = True
         snap.relief = self.relief
         snap.hist = hist
+        snap.species_names = self.rules.species_names(self.cfg, self.state) \
+            if getattr(self.rules, "dynamic_species", False) else self.rules.species_names(self.cfg)
+        snap.species_colors = self.rules.species_colors(self.cfg, self.state) \
+            if getattr(self.rules, "dynamic_species", False) else self.rules.species_colors(self.cfg)
+        snap.dynamic_species = getattr(self.rules, "dynamic_species", False)
         # для показа прореживаем: миллион кубиков браузеру всё равно не нужен
         k = len(snap.coords)
         if self.max_cells and k > self.max_cells:

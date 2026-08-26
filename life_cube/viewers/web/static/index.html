@@ -40,6 +40,7 @@
   .pick { padding:2px 6px; font-size:11.5px; }
   .pick.on { background:#2ec7b8; color:#000; }
   .dim { opacity:.35; }
+  select { background:#0d0f14; color:var(--fg); border:1px solid var(--line); padding:3px; width:100%; }
 </style>
 </head>
 <body>
@@ -48,6 +49,15 @@
   <div id="hud"></div>
 </div>
 <div id="side">
+  <h3>Движок</h3>
+  <div class="row"><select id="engineSel"></select></div>
+  <div class="row muted" id="engineSummary"></div>
+  <div class="row">
+    <button id="btnRestart">Перезапуск</button>
+    <button id="btnRandom">Случайные параметры</button>
+    <button id="btnRandomRestart">Случайные + перезапуск</button>
+  </div>
+
   <h3>Время</h3>
   <div class="row">
     <button id="btnPause">Пауза</button>
@@ -121,6 +131,9 @@
     <label class="sp"><input type="checkbox" id="showSoil" checked> почва</label>
   </div>
 
+  <h3>Виды <span id="speciesCount" class="muted"></span></h3>
+  <table id="speciesTbl"><thead><tr><th>вид</th><th>клеток</th></tr></thead><tbody></tbody></table>
+
   <h3>Организмы <span id="compCount" class="muted"></span></h3>
   <div class="row"><button id="btnClearSel">снять выделение</button></div>
   <table id="comps"><thead><tr><th>id</th><th>вид</th><th>клеток</th><th>z</th><th>с пок.</th></tr></thead><tbody></tbody></table>
@@ -131,13 +144,13 @@
 'use strict';
 // ------------------------------------------------------------------ данные
 const COL = [[0,0,0],[0x2e,0xc7,0xb8],[0xf2,0xc1,0x4e],[0xc0,0x5c,0xe0],[0xf2,0x68,0x3c],[0x7b,0xd9,0x4a],[0x4a,0x9e,0xf2],[0xf2,0x4a,0x9e],[0xd9,0xd9,0xd9]].map(c=>c.map(v=>v/255));
-const MAXSP = 8;
+let MAXSP = 8;
 const STONE=[0x3a,0x3e,0x4a].map(v=>v/255), SOIL=[0x6a,0x4b,0x35].map(v=>v/255);
 const S = {   // состояние вьюера (window.viewer читает/пишет его)
   n: 0, gen: 0, k: 0, pops: [], hist: [], comps: [], names: [], relief: null,
   coords: null, species: null, labels: null, soil: null,
   proj: 'persp', yaw: 0.8, pitch: 0.55, dist: 0, target: [0,0,0], pan:[0,0], nsp: 4,
-  clipZ: 1e9, slab: 0, speciesMask: [1,1,1,1,1,1,1,1], colorMode: 'species',
+  clipZ: 1e9, slab: 0, speciesMask: new Array(256).fill(1), colorMode: 'species',
   minSize: 1, ghost: true, selected: 0, showStone: true, showSoil: true,
   paused: false, rate: 0, measured: 0, frames: 0, connected: false,
 };
@@ -158,9 +171,9 @@ layout(location=4) in float aLabel;   // id организма
 layout(location=5) in float aSize;    // размер организма
 layout(location=6) in float aKind;    // 0 живая, 1 камень, 2 почва
 uniform mat4 uVP;
-uniform float uMask[8];               // маска видов 1..8
+uniform float uMask[256];             // маска видов 1..256
 uniform float uClipZ, uSlabLo, uSlabHi, uMinSize, uSelected, uColorMode, uGhost, uShowStone, uShowSoil;
-uniform vec3 uCol[9];
+uniform vec3 uCol[256];
 out vec3 vCol; out vec3 vNrm; out float vGhost;
 vec3 hashCol(float id){ float h = fract(sin(id*12.9898)*43758.5453); float h2 = fract(sin(id*78.233)*12345.678);
   float hh = h*6.0; vec3 c = clamp(abs(mod(hh+vec3(0,4,2),6.0)-3.0)-1.0,0.0,1.0); return mix(vec3(0.45), c, 0.65+0.35*h2); }
@@ -174,7 +187,7 @@ void main(){
     float m = uMask[int(aSpecies) - 1];
     bool filt = (m < 0.5) || (aSize < uMinSize) || (uSelected > 0.5 && abs(aLabel-uSelected) > 0.5);
     if (filt) { if (uGhost > 0.5) ghost = 1.0; else visible = 0.0; }
-    col = uColorMode < 0.5 ? uCol[int(aSpecies)] : hashCol(aLabel);
+    col = uColorMode < 0.5 ? uCol[int(aSpecies) & 255] : hashCol(aLabel);
   } else if (aKind < 1.5) { col = vec3(0.23,0.24,0.29); if (uShowStone < 0.5) visible = 0.0; }
   else { col = vec3(0.42,0.29,0.21); if (uShowSoil < 0.5) visible = 0.0; }
   float sc = ghost > 0.5 ? 0.28 : 1.0;
@@ -200,7 +213,9 @@ gl.linkProgram(prog); if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw n
 gl.useProgram(prog);
 const U = {}; for (const nm of ['uVP','uMask','uClipZ','uSlabLo','uSlabHi','uMinSize','uSelected','uColorMode','uGhost','uShowStone','uShowSoil'])
   U[nm] = gl.getUniformLocation(prog, nm);
-for (let i=0;i<9;i++) gl.uniform3fv(gl.getUniformLocation(prog, `uCol[${i}]`), COL[i]);
+const uColLoc = gl.getUniformLocation(prog, 'uCol');
+function uploadPalette(){ const arr=new Float32Array(256*3); for (let i=0;i<256;i++){ const c=COL[i]||[0.6,0.6,0.6]; arr[i*3]=c[0]; arr[i*3+1]=c[1]; arr[i*3+2]=c[2]; } gl.uniform3fv(uColLoc, arr); }
+uploadPalette();
 
 // куб: 6 граней × 2 треугольника, с нормалями
 const cubeV = [], cubeN = [];
@@ -280,7 +295,7 @@ function draw(){
   gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
   if (instCount){
     gl.uniformMatrix4fv(U.uVP,false,viewProj());
-    gl.uniform1fv(U.uMask, new Float32Array(S.speciesMask));
+    { const m=new Float32Array(256); for (let i=0;i<256;i++) m[i]=S.speciesMask[i]===0?0:1; gl.uniform1fv(U.uMask, m); }
     gl.uniform1f(U.uClipZ, S.clipZ);
     const half = S.slab>0 ? S.slab/2 : 1e9, yc = S.n/2 - 0.5;
     gl.uniform1f(U.uSlabLo, S.slab>0 ? yc-half : -1e9); gl.uniform1f(U.uSlabHi, S.slab>0 ? yc+half : 1e9);
@@ -293,7 +308,7 @@ function draw(){
   S.frames++;
   const extra = (S.stride>1?`   показана 1/${S.stride} клеток`:'') + (S.componentsOn===false?'   организмы не считаются (большой мир)':'');
   $('hud').textContent = `поколение ${S.gen}   живых ${S.k}${S.stride>1?'×'+S.stride:''}   ${S.paused?'ПАУЗА':(S.measured.toFixed(1)+' пок/с')}   кадр ${S.snapshotMs||0} мс` +
-    `\nвиды ${S.pops.join(' / ')}   организмов ${S.comps.length}${S.selected?'   выделен #'+S.selected:''}${extra}`;
+    `\nвиды ${S.nsp>10 ? (S.pops.filter(p=>p>0).length+' живых, крупнейшие '+S.pops.map((p,i)=>[p,i+1]).filter(x=>x[0]>0).sort((a,b)=>b[0]-a[0]).slice(0,6).map(x=>'#'+x[1]+':'+x[0]).join(' ')) : S.pops.join(' / ')}   организмов ${S.comps.length}${S.selected?'   выделен #'+S.selected:''}${extra}`;
 }
 function loop(){ if (dirty){ dirty=false; draw(); } requestAnimationFrame(loop); }
 requestAnimationFrame(loop);
@@ -328,7 +343,8 @@ $('showStone').onchange = e=>{ S.showStone=e.target.checked; dirty=true; };
 $('showSoil').onchange = e=>{ S.showSoil=e.target.checked; dirty=true; };
 $('btnClearSel').onclick = ()=>{ S.selected=0; renderTable(); dirty=true; };
 function buildSpeciesBox(){ const box=$('speciesBox'); box.innerHTML='';
-  for (let s=1;s<=S.nsp;s++){ const l=document.createElement('label'); l.className='sp';
+  const shown = (S.pops||[]).map((p,i)=>[p,i+1]).filter(x=>x[0]>0 || (S.nsp<=8)).map(x=>x[1]).slice(0,24);
+  for (const s of shown){ const l=document.createElement('label'); l.className='sp';
     const c=(COL[s]||[1,1,1]).map(v=>Math.round(v*255)); l.innerHTML=`<input type="checkbox" ${S.speciesMask[s-1]?'checked':''} data-sp="${s}"><span class="sw" style="background:rgb(${c})"></span>${S.names[s-1]||s}`;
     l.querySelector('input').onchange=e=>{ S.speciesMask[s-1]=e.target.checked?1:0; dirty=true; }; box.appendChild(l); } }
 function renderTable(){ const tb=$('comps').querySelector('tbody'); tb.innerHTML='';
@@ -338,9 +354,17 @@ function renderTable(){ const tb=$('comps').querySelector('tbody'); tb.innerHTML
     const col=COL[sp].map(v=>Math.round(v*255));
     tr.innerHTML=`<td>#${cid}</td><td><span class="sw" style="background:rgb(${col})"></span> ${S.names[sp-1]||sp}</td><td>${size}</td><td>${z0}–${z1}</td><td>${born}</td>`;
     tr.onclick=()=>{ S.selected = S.selected===cid?0:cid; renderTable(); dirty=true; }; tb.appendChild(tr); } }
+function renderSpeciesTable(){ const tb=$('speciesTbl').querySelector('tbody'); tb.innerHTML='';
+  const rows=(S.pops||[]).map((p,i)=>[p,i+1]).filter(x=>x[0]>0).sort((a,b)=>b[0]-a[0]);
+  const total=(S.names||[]).filter(Boolean).length;
+  $('speciesCount').textContent = `(живых ${rows.length}${S.speciesTotal?', всего было '+S.speciesTotal:''})`;
+  for (const [p,s] of rows.slice(0,24)){ const tr=document.createElement('tr'); const c=(COL[s]||[1,1,1]).map(v=>Math.round(v*255));
+    tr.innerHTML=`<td><span class="sw" style="background:rgb(${c})"></span> ${S.names[s-1]||('вид '+s)}</td><td>${p}</td>`;
+    tr.onclick=()=>{ const only = S.speciesMask.some((v,i)=>v===0); S.speciesMask = new Array(256).fill(only&&S.speciesMask[s-1]?1:0); S.speciesMask[s-1]=1; buildSpeciesBox(); dirty=true; };
+    tb.appendChild(tr); } }
 function drawPops(){ const c=$('pops'); const w=c.width=c.clientWidth*2, h=c.height=140; const g=c.getContext('2d'); g.clearRect(0,0,w,h);
   const H=S.hist; if(H.length<2) return; let mx=1; for(const r of H) for(const v of r) mx=Math.max(mx,v);
-  for(let s=0;s<S.nsp;s++){ g.strokeStyle=`rgb(${COL[s+1].map(v=>Math.round(v*255))})`; g.lineWidth=2; g.beginPath();
+  for(let s=0;s<S.nsp;s++){ if (!H.some(r=>r[s]>0)) continue; g.strokeStyle=`rgb(${(COL[s+1]||[1,1,1]).map(v=>Math.round(v*255))})`; g.lineWidth=2; g.beginPath();
     H.forEach((r,i)=>{ const x=i/(H.length-1)*w, y=h-4-(r[s]/mx)*(h-8); i?g.lineTo(x,y):g.moveTo(x,y); }); g.stroke(); } }
 
 // ------------------------------------------------------------------ сеть
@@ -357,8 +381,15 @@ function applyFrame(buf){
   S.paused=hdr.paused; S.rate=hdr.rate; S.measured=hdr.measured_rate;
   S.stride=hdr.stride||1; S.componentsOn=hdr.components_on!==false; S.snapshotMs=hdr.snapshot_ms||0;
   if (hdr.relief){ S.relief=hdr.relief; }
-  if (hdr.species_names) { S.names=hdr.species_names; S.nsp=hdr.species_names.length; buildSpeciesBox(); }
+  if (hdr.species_names) {
+    const key = JSON.stringify([hdr.species_names, hdr.species_colors]);
+    if (key !== S.namesKey){ S.namesKey = key; S.names=hdr.species_names; S.nsp=hdr.species_names.length; MAXSP=Math.max(8,S.nsp);
+      if (hdr.species_colors){ hdr.species_colors.forEach((hex,i)=>{ if(hex) COL[i+1]=[1,3,5].map(k=>parseInt(hex.slice(k,k+2),16)/255); }); uploadPalette(); }
+      buildSpeciesBox(); }
+  }
+  if (hdr.engines) S.engines = hdr.engines;
   if (hdr.config) applyConfig(hdr.config);
+  renderSpeciesTable();
   if (S.n!==hdr.n || firstFrame){ S.n=hdr.n; S.target=[S.n/2,S.n/2,S.n/6]; S.dist=S.n*1.9; S.clipZ=S.n;
     $('clipZ').max=S.n; $('clipZ').value=S.n; $('clipLbl').textContent=S.n; $('slab').max=S.n;
     if (firstFrame){ $('rate').value=Math.log10(Math.max(0.1,S.rate||10)); $('rateLbl').textContent=(S.rate||0).toFixed(1)+' пок/с'; }
@@ -388,7 +419,7 @@ const ANIMAL_GENES = new Set(["hunt","speed","sense","metabolism","repro","lifes
 
 function speciesButtons(){
   const box=$('speciesPick'); box.innerHTML='';
-  CFG.data.names.forEach((nm,i)=>{
+  CFG.data.names.slice(0,24).forEach((nm,i)=>{
     const b=document.createElement('button'); b.className='pick'+(i+1===CFG.pick?' on':'');
     const c=CFG.data.colors[i]||'#888';
     b.innerHTML=`<span class="sw" style="background:${c}"></span> ${nm}`;
@@ -422,33 +453,48 @@ const WORLD_RANGES = { n:[32,256,32], seed_density:[0.001,0.05,0.001], animal_sh
   plant_energy:[0.1,5,0.1], eat_efficiency:[0.1,1,0.05], move_noise:[0,1,0.05] };
 function worldControls(){
   const box=$('world'); box.innerHTML=''; const w=CFG.data.world;
+  const LAB = Object.assign({}, WORLD_LABELS, CFG.data.world_labels||{});
+  const RNG = Object.assign({}, WORLD_RANGES, CFG.data.world_ranges||{});
   for (const k of Object.keys(w)){
     const row=document.createElement('div'); row.className='gene';
     if (k==='seed_world'||k==='seed_mut'){
-      row.innerHTML=`<span>${WORLD_LABELS[k]}</span>`;
+      row.innerHTML=`<span>${LAB[k]}</span>`;
       const inp=document.createElement('input'); inp.type='number'; inp.value=w[k]; inp.style.width='90px';
       inp.oninput=e=>{ CFG.world[k]=+e.target.value; }; row.appendChild(inp); box.appendChild(row); continue;
     }
-    const [lo,hi,st]=WORLD_RANGES[k]||[0,1,0.01];
+    const [lo,hi,st]=RNG[k]||[0,1,0.01];
     const dec = st<0.001?4:(st<0.05?3:(st<1?2:0));
-    row.innerHTML=`<span>${WORLD_LABELS[k]||k}</span><b id="wv_${k}">${(+w[k]).toFixed(dec)}</b>`;
+    row.innerHTML=`<span>${LAB[k]||k}</span><b id="wv_${k}">${(+w[k]).toFixed(dec)}</b>`;
     const inp=document.createElement('input'); inp.type='range'; inp.min=lo; inp.max=hi; inp.step=st; inp.value=w[k];
     inp.oninput=e=>{ CFG.world[k]=+e.target.value; $('wv_'+k).textContent=(+e.target.value).toFixed(dec); };
     row.appendChild(inp); box.appendChild(row);
   }
 }
 function applyConfig(cfg){
+  const engineChanged = !CFG.data || CFG.data.engine !== cfg.engine;
   CFG.data=cfg;
-  if (!CFG.initial) CFG.initial=JSON.parse(JSON.stringify(cfg.genomes));
+  if (engineChanged || !CFG.initial) CFG.initial=JSON.parse(JSON.stringify(cfg.genomes));
   CFG.edited=JSON.parse(JSON.stringify(cfg.genomes));
+  CFG.ids = cfg.ids || null;
   CFG.world=Object.assign({}, cfg.world);
-  S.names=cfg.names; S.nsp=cfg.names.length;
-  cfg.colors.forEach((hex,i)=>{ COL[i+1]=[1,3,5].map(k=>parseInt(hex.slice(k,k+2),16)/255); });
-  for (let i=0;i<9;i++) gl.uniform3fv(gl.getUniformLocation(prog, `uCol[${i}]`), COL[i]||[1,1,1]);
-  buildSpeciesBox(); speciesButtons(); geneSliders(); worldControls(); dirty=true;
+  S.speciesTotal = cfg.species_total || 0;
+  if (!cfg.ids){ S.names=cfg.names; S.nsp=cfg.names.length;
+    cfg.colors.forEach((hex,i)=>{ COL[i+1]=[1,3,5].map(k=>parseInt(hex.slice(k,k+2),16)/255); }); uploadPalette(); buildSpeciesBox(); }
+  if (CFG.pick > cfg.names.length) CFG.pick = 1;
+  fillEngineSelect(); speciesButtons(); geneSliders(); worldControls(); dirty=true;
 }
-$('btnApplyGenes').onclick=()=>send({cmd:'genomes', value:CFG.edited});
-$('btnResetGenes').onclick=()=>{ CFG.edited=JSON.parse(JSON.stringify(CFG.initial)); geneSliders(); send({cmd:'genomes', value:CFG.edited}); };
+function fillEngineSelect(){ const sel=$('engineSel'); if (!S.engines) return;
+  if (sel.options.length !== S.engines.length){ sel.innerHTML=''; for (const e of S.engines){ const o=document.createElement('option'); o.value=e.name; o.textContent=e.title; sel.appendChild(o); } }
+  sel.value = CFG.data.engine; const e=S.engines.find(x=>x.name===CFG.data.engine); $('engineSummary').textContent = e?e.summary:''; }
+$('engineSel').onchange = e=>{ $('status').textContent='переключаю движок…'; send({cmd:'engine', value:e.target.value, n: CFG.world.n||S.n}); };
+$('btnRestart').onclick = ()=>send({cmd:'restart'});
+$('btnRandom').onclick = ()=>{ // случайные гены без перезапуска: применяем как правку
+  if (!CFG.data) return; const f=CFG.data.fields;
+  CFG.edited = CFG.edited.map(row=>row.map((v,gi)=>{ const [lo,hi]=CFG.data.ranges[f[gi]]||[0,1]; if (f[gi]==='trophic'||f[gi]==='speed') return v; return +(lo+Math.random()*(hi-lo)).toFixed(3); }));
+  geneSliders(); send({cmd:'genomes', value:CFG.edited, ids:CFG.ids}); };
+$('btnRandomRestart').onclick = ()=>{ $('status').textContent='случайные параметры + новый мир…'; send({cmd:'randomize', seed: Math.floor(Math.random()*1e9)}); };
+$('btnApplyGenes').onclick=()=>send({cmd:'genomes', value:CFG.edited, ids:CFG.ids});
+$('btnResetGenes').onclick=()=>{ if (CFG.initial.length!==CFG.edited.length){ $('status').textContent='число видов изменилось — исходные не применить'; return; } CFG.edited=JSON.parse(JSON.stringify(CFG.initial)); geneSliders(); send({cmd:'genomes', value:CFG.edited, ids:CFG.ids}); };
 $('btnApplyWorld').onclick=()=>{ $('status').style.color=''; $('status').textContent='пересоздаю мир…'; send({cmd:'world', value:CFG.world, reseed:true}); };
 $('btnRandomSeed').onclick=()=>{ CFG.world.seed_world=Math.floor(Math.random()*1e9); CFG.world.seed_mut=Math.floor(Math.random()*1e9);
   worldControls(); send({cmd:'world', value:CFG.world, reseed:true}); };
@@ -553,7 +599,7 @@ const WF = { canvas: $('waterfall'), col: 0, w: 240, h: 64, ctx: null, img: null
 
 // --------------------------------------------- API для тестов и скриптов
 window.viewer = {
-  S, gl, applyFrame, Audio, WF, CFG, draw: ()=>{ dirty=false; draw(); },
+  S, gl, applyFrame, Audio, WF, CFG, COL, draw: ()=>{ dirty=false; draw(); },
   set(k,v){ S[k]=v; dirty=true; }, setView(v){ setView(v); dirty=true; },
   readPixels(){ resize(); draw(); const w=canvas.width,h=canvas.height; const px=new Uint8Array(w*h*4); gl.readPixels(0,0,w,h,gl.RGBA,gl.UNSIGNED_BYTE,px); return {w,h,px}; },
   // подсчёт пикселей по ближайшему цвету вида (для тестов): возвращает {bg, stone, s1..s4, other}

@@ -42,6 +42,7 @@ def build_parser():
 
     s = sub.add_parser("serve", help="веб-просмотр: http://host:port/")
     _common(s)
+    s.add_argument("--engine", default="ecology", help="движок: ecology | lichen")
     s.add_argument("--host", default="0.0.0.0")
     s.add_argument("--port", type=int, default=8765)
     s.add_argument("--rate", type=float, default=0.0,
@@ -84,7 +85,10 @@ def run_cli(argv=None):
 
     if a.mode == "serve":
         from .viewers.web import serve
-        serve(_cfg(a), use_gpu=a.gpu, host=a.host, port=a.port, rate=a.rate,
+        from .engines import get_rules
+        cfg = _cfg(a) if a.engine == "ecology" else get_rules(a.engine).Config(
+            n=a.n, seed_world=a.seed_world, seed_mut=a.seed_mut)
+        serve(cfg, rules=a.engine, use_gpu=a.gpu, host=a.host, port=a.port, rate=a.rate,
               snapshot_every=a.snapshot_every, components=not a.no_components,
               autostart=not a.paused, fps=a.fps, components_hz=a.components_hz, yield_ms=a.yield_ms,
               max_n=a.max_n, max_cells=a.max_cells)

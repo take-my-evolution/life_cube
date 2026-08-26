@@ -1,10 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
 build/
 dist/
-*.egg-info/
-logs/
-*.npz
 *.png
-*.pyc
-__pycache__/
+*.npz
 runs/
-.venv/

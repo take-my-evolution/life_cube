@@ -238,3 +238,40 @@ def test_oversized_world_is_refused_with_message(page, server):
     assert server["engine"].cfg.n == n_before
     txt = page.inner_text("#status")
     assert "предел" in txt
+
+
+def test_engine_switch_from_browser(page, server):
+    """Переключение движка из выпадающего списка: новый мир, новые гены в панели,
+    имена видов приходят каждый кадр (динамические виды)."""
+    e = server["engine"]
+    page.wait_for_function("viewer.S.engines && viewer.S.engines.length >= 2", timeout=5000)
+    page.evaluate("viewer.CFG.world.n = 32")          # предыдущие тесты могли раздуть мир
+    page.select_option("#engineSel", "lichen")
+    page.wait_for_function("viewer.CFG.data && viewer.CFG.data.engine === 'lichen'", timeout=20000)
+    assert e.rules.name == "lichen"
+    cfg = page.evaluate("viewer.CFG.data")
+    assert "substrate" in cfg["fields"] and cfg["ids"] == [1]
+    # пара шагов — и кадр с именами видов и рельефом
+    page.click("#btnStep"); page.click("#btnStep")
+    page.wait_for_function("viewer.S.gen >= 2 && viewer.S.names && viewer.S.names[0] === 'лишайник'", timeout=10000)
+    assert page.evaluate("viewer.S.relief !== null")
+    # обратно на экологию
+    page.evaluate("viewer.CFG.world.n = 32")
+    page.select_option("#engineSel", "ecology")
+    page.wait_for_function("viewer.CFG.data && viewer.CFG.data.engine === 'ecology'", timeout=20000)
+    assert e.rules.name == "ecology"
+
+
+def test_randomize_and_restart_buttons(page, server):
+    e = server["engine"]
+    g_before = e.cfg.genomes.copy()
+    page.click("#btnRandomRestart")
+    page.wait_for_function("viewer.S.gen <= 1", timeout=10000)
+    page.wait_for_timeout(500)
+    assert not np.array_equal(e.cfg.genomes, g_before)     # гены поменялись
+    assert e.gen <= 3                                       # мир пересоздан
+    # «Перезапуск» — те же гены, мир с нуля
+    page.click("#btnStep"); page.wait_for_timeout(300)
+    g2 = e.cfg.genomes.copy()
+    page.click("#btnRestart"); page.wait_for_timeout(800)
+    assert np.array_equal(e.cfg.genomes, g2) and e.gen <= 2

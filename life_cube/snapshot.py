@@ -159,12 +159,14 @@ def describe_components(coords, species, ids, born, max_components=None):
 
 
 def make_snapshot(state, gen, cfg, tracker=None, with_components=True,
-                  max_components=200):
+                  max_components=200, n_species=None):
     """Собрать Snapshot из state симуляции (массивы могут быть на GPU)."""
     species = to_cpu(state["species"])
     n = species.shape[0]
     coords, sp = pack_cells(species)
-    pops = [int((species == s).sum()) for s in range(1, cfg.n_species + 1)]
+    n_species = n_species or cfg.n_species
+    counts = np.bincount(species.ravel().astype(np.int64), minlength=n_species + 1)
+    pops = [int(c) for c in counts[1:n_species + 1]]
     soil_coords, _ = pack_cells(state["soil"])
 
     if with_components:
