@@ -11,6 +11,7 @@
 
 Клиент шлёт JSON-команды: {"cmd": "pause"|"resume"|"step"|"rate", "value": ..}
                           {"cmd": "reset", "seed_world":..,"seed_mut":..}
+                          {"cmd": "seeding", "value": {...}, "restart": bool}
 """
 
 import asyncio
@@ -276,6 +277,25 @@ class WebViewer:
             if reseed:
                 e.reset()
             self.mapper = SoundMapper()
+            self._push_config()
+        elif c == "seeding":
+            # кем заселять мир и нужен ли повторный засев
+            v = dict(cmd.get("value") or {})
+            params = {}
+            if "start_species" in v:
+                params["start_species"] = tuple(int(x) for x in v["start_species"])
+            for k in ("reseed", "reseed_on_extinction"):
+                if k in v:
+                    params[k] = bool(v[k])
+            for k in ("reseed_every", "reseed_count"):
+                if k in v:
+                    params[k] = max(1, int(v[k]))
+            if params.get("start_species") == () and "start_species" in params:
+                raise ValueError("выбери хотя бы один стартовый вид")
+            e.set_world(**params)
+            if bool(cmd.get("restart", False)):
+                e.reset()
+                self.mapper = SoundMapper()
             self._push_config()
         elif c == "config":
             self._push_config()

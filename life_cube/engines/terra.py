@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import Rules
+from . import Rules, seeding_json
 from ..fields import light_field
 
 GENES = ("light", "stone", "soil", "water", "erode", "enrich", "symbiont",
@@ -53,6 +53,20 @@ MAX_SPECIES = 64
 LICHEN = np.array([0.85, 1.00, 0.05, 0.00, 0.55, 0.00, 0.00, 0.00, 0.35, 0.06, 1.8, 0.004],
                   np.float32)
 
+# Кем можно заселить мир в начале. Каждый архетип — готовый геном; всё
+# остальное (в том числе растения) должно появиться мутациями. Набор
+# выбирается в панели: только лишайник, лишайник+бактерия, и так далее.
+STARTERS = (
+    ("лишайник", "камень", LICHEN),
+    ("бактерия", "почва",
+     np.array([0.80, 0.05, 1.00, 0.00, 0.05, 0.90, 0.00, 0.00, 0.30, 0.06, 1.8, 0.004], np.float32)),
+    ("водоросль", "вода",
+     np.array([0.85, 0.00, 0.10, 1.00, 0.00, 0.10, 0.00, 0.00, 0.25, 0.05, 1.6, 0.004], np.float32)),
+    ("мох", "почва",
+     np.array([0.75, 0.30, 0.80, 0.00, 0.10, 0.10, 0.00, 0.05, 0.40, 0.05, 1.6, 0.004], np.float32)),
+)
+STARTER_NAMES = tuple(x[0] for x in STARTERS)
+
 
 @dataclass
 class TerraConfig:
@@ -66,7 +80,7 @@ class TerraConfig:
     relief_amp: float = 0.55        # размах хребтов относительно средней высоты
     ridges: float = 0.6             # 0 — холмы, 1 — острые хребты
     soil_start: float = 0.35        # сколько низин уже покрыто почвой
-    sea_level: float = 0.18         # уровень моря (доля куба)
+    sea_level: float = 0.12         # уровень моря (доля площади под водой)
 
     # гидрология
     rain_rate: float = 0.035        # доля столбцов под каплей за поколение
@@ -98,6 +112,13 @@ class TerraConfig:
     min_change: float = 0.06
     max_new_species: int = 4
     p_shock: float = 0.0004
+
+    # кем заселяем в начале (номера архетипов из STARTERS) и повторный засев
+    start_species: tuple = (0,)
+    reseed: bool = False            # подсевать заново
+    reseed_on_extinction: bool = True   # только когда всё вымерло
+    reseed_every: int = 200         # не чаще, чем раз в столько поколений
+    reseed_count: int = 40          # сколько клеток подсевать
 
     genomes: np.ndarray = field(
         default_factory=lambda: np.zeros((MAX_SPECIES, len(GENES)), np.float32))
@@ -176,6 +197,7 @@ class TerraRules(Rules):
     dynamic_species = True
     terrain_changes = True
     heightmaps = True
+    can_seed = True
 
     WORLD_PARAMS = ("n", "seed_world", "seed_mut", "stone_fraction", "relief_amp",
                     "ridges", "soil_start", "sea_level", "rain_rate", "evaporate",
@@ -221,11 +243,22 @@ class TerraRules(Rules):
         water_h = _fill_basins(ground, sea)
 
         species = np.zeros((n, n, n), np.uint8)
-        xx, yy = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
-        # лишайник садится на голый камень выше воды
-        seedable = (soil_h == 0) & (water_h == 0)
-        species[xx[seedable], yy[seedable], ground[seedable]] = 1
-        energy = np.where(species > 0, cfg.start_energy, 0).astype(np.float32)
+        energy = np.zeros((n, n, n), np.float32)
+        starters = list(cfg.start_species) or [0]
+        genomes = np.zeros((MAX_SPECIES, len(GENES)), np.float32)
+        registry, free_ids = {}, list(range(1, MAX_SPECIES + 1))
+        for si in starters:
+            name, habitat, gen0 = STARTERS[int(si) % len(STARTERS)]
+            sid = free_ids.pop(0)
+            genomes[sid - 1] = gen0
+            mask = self._habitat_mask(habitat, stone_h, soil_h, water_h)
+            xs, ys = np.nonzero(mask)
+            species[xs, ys, ground[xs, ys]] = sid
+            energy[xs, ys, ground[xs, ys]] = cfg.start_energy
+            registry[sid] = {"parent": 0, "born": 0, "died": None,
+                             "genome": gen0.tolist(), "peak": int(mask.sum()),
+                             "changed": None, "starter": name}
+        cfg.genomes = genomes
 
         state = {
             "species": xp.asarray(species),
@@ -242,13 +275,70 @@ class TerraRules(Rules):
             "genomes": xp.asarray(cfg.genomes),
             "rng": xp.random.default_rng(cfg.seed_mut),
             "rng_cpu": np.random.default_rng(cfg.seed_mut ^ 0x9e3779b9),
-            "registry": {1: {"parent": 0, "born": 0, "died": None,
-                             "genome": cfg.genomes[0].tolist(),
-                             "peak": int((species > 0).sum()), "changed": None}},
-            "lineage": [], "free_ids": list(range(2, MAX_SPECIES + 1)), "gen": 0,
+            "registry": registry,
+            "lineage": [], "free_ids": free_ids, "gen": 0,
+            "last_reseed": 0,
         }
         self._sync_volumes(state, cfg, xp)
         return state, stone_h.copy()
+
+    @staticmethod
+    def _habitat_mask(habitat, stone_h, soil_h, water_h):
+        """Где может сесть архетип: камень — сухой голый камень, почва —
+        столбцы с почвой без глубокой воды, вода — залитые столбцы."""
+        if habitat == "камень":
+            return (soil_h == 0) & (water_h == 0)
+        if habitat == "почва":
+            return (soil_h > 0) & (water_h == 0)
+        return water_h > 0
+
+    def seed(self, state, cfg, xp, rng, count=None, gen=0):
+        """Подсев: живые клетки стартовых архетипов в подходящие пустые места.
+        Возвращает, сколько клеток посажено."""
+        from ..backend import to_cpu
+        n = cfg.n
+        stone_h, soil_h, water_h = (to_cpu(state["stone_h"]), to_cpu(state["soil_h"]),
+                                    to_cpu(state["water_h"]))
+        ground = stone_h + soil_h
+        species = to_cpu(state["species"])
+        energy = to_cpu(state["energy"])
+        rng_cpu = state["rng_cpu"]
+        count = int(count or cfg.reseed_count)
+        planted = 0
+        for si in (list(cfg.start_species) or [0]):
+            name, habitat, gen0 = STARTERS[int(si) % len(STARTERS)]
+            # свой ли это вид уже живёт — подсаживаем его же, иначе заводим новый
+            sid = next((k for k, r in state["registry"].items()
+                        if r.get("starter") == name), None)
+            if sid is None:
+                if not state["free_ids"]:
+                    continue
+                sid = state["free_ids"].pop(0)
+                cfg.genomes[sid - 1] = gen0
+                state["registry"][sid] = {"parent": 0, "born": gen, "died": None,
+                                          "genome": gen0.tolist(), "peak": 1,
+                                          "changed": None, "starter": name}
+            mask = self._habitat_mask(habitat, stone_h, soil_h, water_h)
+            xs, ys = np.nonzero(mask)
+            if len(xs) == 0:
+                continue
+            k = min(max(count // max(len(cfg.start_species) or 1, 1), 1), len(xs))
+            pick = rng_cpu.choice(len(xs), size=k, replace=False)
+            x, y = xs[pick], ys[pick]
+            z = ground[x, y]
+            free = species[x, y, z] == 0
+            species[x[free], y[free], z[free]] = sid
+            energy[x[free], y[free], z[free]] = cfg.start_energy
+            planted += int(free.sum())
+        state["species"] = xp.asarray(species)
+        state["energy"] = xp.asarray(energy)
+        state["genomes"] = xp.asarray(cfg.genomes)
+        state["last_reseed"] = gen
+        return planted
+
+    def starters_json(self, cfg):
+        return [{"i": i, "name": nm, "habitat": hb, "on": i in tuple(cfg.start_species)}
+                for i, (nm, hb, _g) in enumerate(STARTERS)]
 
     def _sync_volumes(self, state, cfg, xp):
         n = cfg.n
@@ -350,12 +440,17 @@ class TerraRules(Rules):
 
         on_ground = alive & (zz == ground3)
         above = alive & (zz > ground3)
-        depth = xp.maximum(water_h[:, :, None] - (zz - ground3), 0)
+        # глубина считается для ЛЮБОЙ клетки, а не только для донной: стебель,
+        # идущий вверх сквозь толщу воды, тоже сидит в тени, а вынырнув —
+        # получает полный свет. Отсюда смысл расти вверх из воды.
+        surface_h = (ground + water_h)[:, :, None]
+        depth = xp.maximum(surface_h - zz, 0).astype(xp.float32)
+        under = alive & (zz < surface_h)
         submerged = on_ground & (water_h[:, :, None] > 0)
 
         # --- свет (вода гасит) ------------------------------------------------
         L = light_field(alive, gene("absorb"), xp)
-        L = L * xp.where(submerged, cfg.water_light ** xp.minimum(depth, 6).astype(xp.float32), 1.0)
+        L = L * xp.where(under, cfg.water_light ** xp.minimum(depth, 6.0), 1.0)
 
         # --- ниша: камень / почва / вода -------------------------------------
         has_soil = (soil_h > 0)[:, :, None]
@@ -365,7 +460,13 @@ class TerraRules(Rules):
         # клетка над землёй (стебель) живёт светом, но только если под ней своя
         same_below = xp.zeros_like(alive)
         same_below[:, :, 1:] = (species[:, :, 1:] == species[:, :, :-1]) & alive[:, :, :-1]
-        niche = xp.where(above & same_below, gene("up"), niche)
+        # стебель: над водой живёт светом (ген up), под водой — ещё и тем,
+        # насколько вид приспособлен к воде, иначе из озера не выбраться
+        stem = above & same_below
+        stem_niche = xp.where(zz < surface_h,
+                              xp.maximum(gene("up") * 0.5, gene("water")),
+                              gene("up"))
+        niche = xp.where(stem, stem_niche, niche)
         factor = cfg.niche_floor + (1.0 - cfg.niche_floor) * xp.clip(niche, 0.0, 1.0)
 
         # --- бактерии удобряют почву, симбионты живут только на удобренной ----
@@ -666,6 +767,8 @@ class TerraRules(Rules):
             "genomes": [np.asarray(cfg.genomes[i - 1]).tolist() for i in ids],
             "world": {k: getattr(cfg, k) for k in self.WORLD_PARAMS},
             "world_labels": self.WORLD_LABELS, "world_ranges": self.WORLD_RANGES,
+            "starters": self.starters_json(cfg),
+            "reseed": seeding_json(cfg),
             "species_total": (len(state["lineage"]) + len(state["registry"])) if state else 1,
         }
 

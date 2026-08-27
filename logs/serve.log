@@ -35,3 +35,4 @@ Traceback (most recent call last):
   File "/home/mushishi/git/life_cube/.venv/lib/python3.12/site-packages/aiohttp/_websocket/writer.py", line 150, in _write_websocket_frame
     raise ClientConnectionResetError("Cannot write to closing transport")
 aiohttp.client_exceptions.ClientConnectionResetError: Cannot write to closing transport
+life-cube web viewer: http://0.0.0.0:8765/  (движок ecology, куб 128³, GPU)

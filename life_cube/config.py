@@ -102,6 +102,15 @@ class Config:
 
     seed_density: float = 0.006   # доля точек поверхности под споры
     animal_share: float = 0.30    # какая доля засева — животные
+
+    # кем заселяем мир в начале: номера видов (1-based), пусто = всеми.
+    # Так можно запустить мир «только мох» или «мох и травоядное».
+    start_species: tuple = ()
+    # повторный засев: спасательный круг для вымершего мира
+    reseed: bool = False
+    reseed_on_extinction: bool = True   # только когда живых не осталось
+    reseed_every: int = 200             # не чаще, чем раз в столько поколений
+    reseed_count: int = 200             # сколько клеток подсевать
     genomes: np.ndarray = field(default_factory=lambda: DEFAULT_GENOMES.copy())
 
     @property

@@ -24,6 +24,8 @@ def init_state(cfg: Config, xp):
         # отдельный поток случайности для жизни — не смешивается с сидом мира
         "rng": xp.random.default_rng(cfg.seed_mut),
         "maxfilter": max_filter_for(xp),
+        # поверхность нужна повторному засеву (Rules.seed)
+        "relief": relief,
     }
     return state, relief
 

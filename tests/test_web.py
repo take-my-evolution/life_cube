@@ -275,3 +275,22 @@ def test_randomize_and_restart_buttons(page, server):
     g2 = e.cfg.genomes.copy()
     page.click("#btnRestart"); page.wait_for_timeout(800)
     assert np.array_equal(e.cfg.genomes, g2) and e.gen <= 2
+
+
+def test_starters_and_reseed_panel(page, server):
+    """Панель «Кем заселять» строится из конфига движка, а галочка повторного
+    засева открывает свои настройки."""
+    k = page.evaluate("document.querySelectorAll('#starters .gene').length")
+    assert k == 8, k                              # восемь видов «экологии»
+    names = page.evaluate("Array.from(document.querySelectorAll('#starters .gene span'))"
+                          ".map(e=>e.textContent.trim())")
+    assert "мох" in names and "травоядное" in names
+    assert page.evaluate("getComputedStyle(document.getElementById('reseedBox')).display") == "none"
+    page.evaluate("document.getElementById('reseedOn').checked = true;"
+                  " document.getElementById('reseedOn').onchange()")
+    page.wait_for_timeout(300)
+    assert page.evaluate("getComputedStyle(document.getElementById('reseedBox')).display") != "none"
+    assert server["engine"].cfg.reseed is True
+    page.evaluate("document.getElementById('reseedOn').checked = false;"
+                  " document.getElementById('reseedOn').onchange()")
+    page.wait_for_timeout(300)

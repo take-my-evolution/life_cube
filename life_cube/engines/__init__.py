@@ -37,6 +37,14 @@ def list_engines():
     return out
 
 
+def seeding_json(cfg):
+    """Настройки повторного засева для панели."""
+    return {"on": bool(getattr(cfg, "reseed", False)),
+            "on_extinction": bool(getattr(cfg, "reseed_on_extinction", True)),
+            "every": int(getattr(cfg, "reseed_every", 200)),
+            "count": int(getattr(cfg, "reseed_count", 200))}
+
+
 class Rules:
     """Интерфейс движка. Все методы — без состояния, состояние живёт в `state`."""
 
@@ -78,6 +86,19 @@ class Rules:
     def randomize(self, cfg, rng):
         """-> новая таблица геномов (случайная, но осмысленная)."""
         raise NotImplementedError
+
+    # --- засев ------------------------------------------------------------
+    # Движок может уметь подсаживать жизнь в уже готовый мир: этим пользуется
+    # Engine, когда включён повторный засев (спасение вымершего мира).
+    can_seed = False
+
+    def seed(self, state, cfg, xp, rng, count=None, gen=0):
+        """Подсадить `count` клеток стартовых видов. -> сколько посажено."""
+        return 0
+
+    def starters_json(self, cfg):
+        """[{i, name, habitat, on}] — кем можно заселить мир (для панели)."""
+        return []
 
     def world_params(self):
         """Имена параметров мира, которые можно менять из панели."""

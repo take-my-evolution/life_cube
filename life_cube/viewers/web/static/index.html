@@ -93,6 +93,19 @@
   </div>
   <div class="row muted" id="geneHint">Геном применяется на лету, мир не пересоздаётся.</div>
 
+  <h3>Кем заселять</h3>
+  <div class="row muted" id="startHint">Отметь виды, с которых начинается мир. Остальное должно появиться само.</div>
+  <div id="starters"></div>
+  <div class="row"><button id="btnApplyStart">Заселить заново</button></div>
+  <div class="gene"><span><input type="checkbox" id="reseedOn"> повторный засев</span></div>
+  <div id="reseedBox" style="display:none">
+    <div class="gene"><span><input type="checkbox" id="reseedExt" checked> только при вымирании</span></div>
+    <div class="gene"><span>не чаще, поколений</span><b id="rv_every">200</b>
+      <input type="range" id="reseedEvery" min="10" max="2000" step="10" value="200"></div>
+    <div class="gene"><span>клеток за раз</span><b id="rv_count">200</b>
+      <input type="range" id="reseedCount" min="10" max="2000" step="10" value="200"></div>
+  </div>
+
   <h3>Мир и засев</h3>
   <div id="world"></div>
   <div class="row">
@@ -130,6 +143,7 @@
   <div class="row">
     <label class="sp"><input type="checkbox" id="showStone" checked> камень</label>
     <label class="sp"><input type="checkbox" id="showSoil" checked> почва</label>
+    <label class="sp"><input type="checkbox" id="showWater" checked> вода</label>
   </div>
 
   <h3>Виды <span id="speciesCount" class="muted"></span></h3>
@@ -152,7 +166,7 @@ const S = {   // состояние вьюера (window.viewer читает/п�
   coords: null, species: null, labels: null, soil: null,
   proj: 'persp', yaw: 0.8, pitch: 0.55, dist: 0, target: [0,0,0], pan:[0,0], nsp: 4,
   clipZ: 1e9, slab: 0, speciesMask: new Array(256).fill(1), colorMode: 'species',
-  minSize: 1, ghost: true, selected: 0, showStone: true, showSoil: true,
+  minSize: 1, ghost: true, selected: 0, showStone: true, showSoil: true, showWater: true,
   paused: false, rate: 0, measured: 0, frames: 0, connected: false, autoHz: true,
 };
 const $ = id => document.getElementById(id);
@@ -174,7 +188,7 @@ layout(location=6) in float aKind;    // 0 живая, 1 камень, 2 поч�
 layout(location=7) in float aHeight;  // высота столба в клетках (1 у живых)
 uniform mat4 uVP;
 uniform float uMask[256];             // маска видов 1..256
-uniform float uClipZ, uSlabLo, uSlabHi, uMinSize, uSelected, uColorMode, uGhost, uShowStone, uShowSoil, uWaterPass;
+uniform float uClipZ, uSlabLo, uSlabHi, uMinSize, uSelected, uColorMode, uGhost, uShowStone, uShowSoil, uShowWater, uWaterPass;
 uniform vec3 uCol[256];
 out vec3 vCol; out vec3 vNrm; out float vGhost;
 vec3 hashCol(float id){ float h = fract(sin(id*12.9898)*43758.5453); float h2 = fract(sin(id*78.233)*12345.678);
@@ -192,7 +206,7 @@ void main(){
     col = uColorMode < 0.5 ? uCol[int(aSpecies) & 255] : hashCol(aLabel);
   } else if (aKind < 1.5) { col = vec3(0.30,0.31,0.35); if (uShowStone < 0.5) visible = 0.0; }
   else if (aKind < 2.5) { col = vec3(0.35,0.25,0.16); if (uShowSoil < 0.5) visible = 0.0; }
-  else { col = vec3(0.16,0.40,0.72); }
+  else { col = vec3(0.16,0.40,0.72); if (uShowWater < 0.5) visible = 0.0; }
   // вода рисуется вторым, полупрозрачным проходом
   if ((uWaterPass > 0.5) != (aKind > 2.5)) visible = 0.0;
   float sc = ghost > 0.5 ? 0.28 : 1.0;
@@ -217,7 +231,7 @@ const prog = gl.createProgram();
 gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
 gl.linkProgram(prog); if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
 gl.useProgram(prog);
-const U = {}; for (const nm of ['uVP','uMask','uClipZ','uSlabLo','uSlabHi','uMinSize','uSelected','uColorMode','uGhost','uShowStone','uShowSoil','uWaterPass'])
+const U = {}; for (const nm of ['uVP','uMask','uClipZ','uSlabLo','uSlabHi','uMinSize','uSelected','uColorMode','uGhost','uShowStone','uShowSoil','uShowWater','uWaterPass'])
   U[nm] = gl.getUniformLocation(prog, nm);
 const uColLoc = gl.getUniformLocation(prog, 'uCol');
 function uploadPalette(){ const arr=new Float32Array(256*3); for (let i=0;i<256;i++){ const c=COL[i]||[0.6,0.6,0.6]; arr[i*3]=c[0]; arr[i*3+1]=c[1]; arr[i*3+2]=c[2]; } gl.uniform3fv(uColLoc, arr); }
@@ -327,10 +341,11 @@ function draw(){
     gl.uniform1f(U.uMinSize, S.minSize); gl.uniform1f(U.uSelected, S.selected);
     gl.uniform1f(U.uColorMode, S.colorMode==='species'?0:1); gl.uniform1f(U.uGhost, S.ghost?1:0);
     gl.uniform1f(U.uShowStone, S.showStone?1:0); gl.uniform1f(U.uShowSoil, S.showSoil?1:0);
+    gl.uniform1f(U.uShowWater, S.showWater?1:0);
     gl.bindVertexArray(vao);
     gl.uniform1f(U.uWaterPass, 0);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, instCount);
-    if (S.hasWater){    // вода — полупрозрачным проходом поверх
+    if (S.hasWater && S.showWater){    // вода — полупрозрачным проходом поверх
       gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
       gl.uniform1f(U.uWaterPass, 1);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, instCount);
@@ -373,6 +388,7 @@ $('minSize').oninput = e=>{ S.minSize=Math.round(Math.pow(10,+e.target.value)); 
 $('ghost').onchange = e=>{ S.ghost=e.target.checked; dirty=true; };
 $('showStone').onchange = e=>{ S.showStone=e.target.checked; dirty=true; };
 $('showSoil').onchange = e=>{ S.showSoil=e.target.checked; dirty=true; };
+$('showWater').onchange = e=>{ S.showWater=e.target.checked; dirty=true; };
 $('btnClearSel').onclick = ()=>{ S.selected=0; renderTable(); dirty=true; };
 function buildSpeciesBox(){ const box=$('speciesBox'); box.innerHTML='';
   const shown = (S.pops||[]).map((p,i)=>[p,i+1]).filter(x=>x[0]>0 || (S.nsp<=8)).map(x=>x[1]).slice(0,24);
@@ -512,6 +528,43 @@ function worldControls(){
     row.appendChild(inp); box.appendChild(row);
   }
 }
+function startersUI(){
+  const box=$('starters'); const list=(CFG.data&&CFG.data.starters)||[];
+  box.innerHTML='';
+  if(!list.length){ $('startHint').textContent='этот движок не умеет выбирать стартовые виды'; return; }
+  CFG.start = list.filter(x=>x.on).map(x=>x.i);
+  for(const it of list){
+    const row=document.createElement('div'); row.className='gene';
+    const lab=document.createElement('span');
+    const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=!!it.on;
+    cb.onchange=()=>{ const k=CFG.start.indexOf(it.i);
+      if(cb.checked && k<0) CFG.start.push(it.i); else if(!cb.checked && k>=0) CFG.start.splice(k,1); };
+    lab.appendChild(cb); lab.appendChild(document.createTextNode(' '+it.name));
+    row.appendChild(lab);
+    const b=document.createElement('b'); b.textContent=it.habitat||''; row.appendChild(b);
+    box.appendChild(row);
+  }
+  const r=(CFG.data&&CFG.data.reseed)||null;
+  if(r){ $('reseedOn').checked=r.on; $('reseedExt').checked=r.on_extinction;
+    $('reseedEvery').value=r.every; $('rv_every').textContent=r.every;
+    $('reseedCount').value=r.count; $('rv_count').textContent=r.count;
+    $('reseedBox').style.display = r.on ? '' : 'none'; }
+}
+function seedingPayload(){
+  return { start_species: CFG.start||[], reseed: $('reseedOn').checked,
+           reseed_on_extinction: $('reseedExt').checked,
+           reseed_every: +$('reseedEvery').value, reseed_count: +$('reseedCount').value };
+}
+function sendSeeding(restart){ send({cmd:'seeding', value:seedingPayload(), restart:!!restart}); }
+$('btnApplyStart').onclick=()=>{ if(!(CFG.start||[]).length){ $('status').textContent='отметь хотя бы один вид'; return; }
+  $('status').textContent='заселяю заново…'; sendSeeding(true); };
+$('reseedOn').onchange=()=>{ $('reseedBox').style.display=$('reseedOn').checked?'':'none'; sendSeeding(false); };
+$('reseedExt').onchange=()=>sendSeeding(false);
+$('reseedEvery').oninput=e=>{ $('rv_every').textContent=e.target.value; };
+$('reseedCount').oninput=e=>{ $('rv_count').textContent=e.target.value; };
+$('reseedEvery').onchange=()=>sendSeeding(false);
+$('reseedCount').onchange=()=>sendSeeding(false);
+
 function applyConfig(cfg){
   const engineChanged = !CFG.data || CFG.data.engine !== cfg.engine;
   CFG.data=cfg;
@@ -523,7 +576,7 @@ function applyConfig(cfg){
   if (!cfg.ids){ S.names=cfg.names; S.nsp=cfg.names.length;
     cfg.colors.forEach((hex,i)=>{ COL[i+1]=[1,3,5].map(k=>parseInt(hex.slice(k,k+2),16)/255); }); uploadPalette(); buildSpeciesBox(); }
   if (CFG.pick > cfg.names.length) CFG.pick = 1;
-  fillEngineSelect(); speciesButtons(); geneSliders(); worldControls(); dirty=true;
+  fillEngineSelect(); speciesButtons(); geneSliders(); worldControls(); startersUI(); dirty=true;
 }
 function fillEngineSelect(){ const sel=$('engineSel'); if (!S.engines) return;
   if (sel.options.length !== S.engines.length){ sel.innerHTML=''; for (const e of S.engines){ const o=document.createElement('option'); o.value=e.name; o.textContent=e.title; sel.appendChild(o); } }

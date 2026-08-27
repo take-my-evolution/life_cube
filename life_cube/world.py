@@ -32,6 +32,15 @@ def build_kernel(xp=np):
     return xp.asarray(K)
 
 
+def allowed_species(cfg) -> set:
+    """Кем разрешено заселять мир (1-based номера видов). Пустой
+    `cfg.start_species` = всеми: так вёл себя мир до появления настройки."""
+    want = tuple(getattr(cfg, "start_species", ()) or ())
+    if not want:
+        return set(range(1, cfg.n_species + 1))
+    return {int(s) for s in want if 1 <= int(s) <= cfg.n_species}
+
+
 def build_world(cfg: Config, xp=np):
     """Рельеф камня, карта влажности подложки и стартовый засев спорами.
 
@@ -75,8 +84,13 @@ def build_world(cfg: Config, xp=np):
     # растения и животные засеваются отдельно: животных обычно меньше, и они
     # должны стартовать вперемешку с едой, а не сплошным пятном
     mobile = cfg.mobile_mask()
-    plants = np.flatnonzero(~mobile) + 1
-    animals = np.flatnonzero(mobile) + 1
+    allowed = allowed_species(cfg)
+    plants = np.array([s for s in np.flatnonzero(~mobile) + 1 if s in allowed], dtype=int)
+    animals = np.array([s for s in np.flatnonzero(mobile) + 1 if s in allowed], dtype=int)
+    if len(plants) == 0 and len(animals) == 0:
+        raise RuntimeError("некем заселять: пустой список стартовых видов")
+    if len(plants) == 0:                 # мир только из животных — еды нет, но пусть
+        plants = animals
     if len(animals) == 0 or cfg.animal_share <= 0:
         cycle = (plants[np.arange(k) % len(plants)]).astype(np.int8)
     else:

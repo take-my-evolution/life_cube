@@ -56,6 +56,8 @@ class Engine:
         self.max_cells = int(max_cells)     # столько живых клеток шлём зрителю
         self.snapshot_seconds = 0.0         # сколько занял последний снимок
         self.busy = False                   # снимок уже считается
+        self.reseeds = 0                    # сколько раз мир подсевали
+        self.last_reseed_gen = None
         self.publish(force=True)
 
     # --- управление ---------------------------------------------------------
@@ -127,6 +129,8 @@ class Engine:
             self.gen = 0
             self.hist.clear()
             self.hist_long.clear()
+            self.reseeds = 0
+            self.last_reseed_gen = None
             self.tracker = Tracker() if self.components else None
         self.publish(force=True)
 
@@ -138,7 +142,34 @@ class Engine:
             self.hist.append(pops)
             if self.gen % self.HIST_EVERY == 0:
                 self.hist_long.append(pops)
+        self.maybe_reseed(pops)
         return pops
+
+    # --- повторный засев ----------------------------------------------------
+    def maybe_reseed(self, pops):
+        """Спасательный круг: вымерший мир больше не остаётся пустым навсегда.
+
+        Включается галочкой (`cfg.reseed`). По умолчанию срабатывает только при
+        полном вымирании и не чаще, чем раз в `reseed_every` поколений — иначе
+        подсев затирает результат эволюции."""
+        cfg = self.cfg
+        if not getattr(cfg, "reseed", False) or not getattr(self.rules, "can_seed", False):
+            return 0
+        every = max(int(getattr(cfg, "reseed_every", 200)), 1)
+        last = self.state.get("last_reseed", -10 ** 9) if isinstance(self.state, dict) else 0
+        if self.gen - last < every:
+            return 0
+        extinct = sum(pops) == 0
+        if getattr(cfg, "reseed_on_extinction", True) and not extinct:
+            return 0
+        with self._lock:
+            k = self.rules.seed(self.state, cfg, self.xp,
+                                self.state.get("rng"), count=None, gen=self.gen)
+            self.state["last_reseed"] = self.gen
+        if k:
+            self.reseeds = getattr(self, "reseeds", 0) + 1
+            self.last_reseed_gen = self.gen
+        return k
 
     def publish(self, force=False, components=None):  # noqa: C901
         """Снимок текущего состояния. snapshot_every=0 — из цикла не зовётся,

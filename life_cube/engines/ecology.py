@@ -12,6 +12,8 @@ from . import Rules
 from .. import config as C
 from ..sim import init_state as _init_state
 from ..step import step as _step
+from ..world import allowed_species
+from . import seeding_json
 
 
 class EcologyRules(Rules):
@@ -22,6 +24,8 @@ class EcologyRules(Rules):
     doc = "docs/engines/ecology.md"
     Config = C.Config
 
+    can_seed = True
+
     WORLD_PARAMS = ("n", "seed_world", "seed_mut", "seed_density", "animal_share",
                     "stone_fraction", "relief_amp", "p_shock", "p_dissolve",
                     "plant_energy", "eat_efficiency", "move_noise")
@@ -31,6 +35,51 @@ class EcologyRules(Rules):
 
     def step(self, state, cfg, xp, correlate, gen):
         return _step(state, cfg, xp, correlate, gen)
+
+    # --- засев --------------------------------------------------------------
+    def starters_json(self, cfg):
+        """Кем можно заселить мир: все виды движка, отмечены выбранные.
+        Пустой выбор = все (так мир вёл себя всегда)."""
+        want = set(allowed_species(cfg))
+        mobile = cfg.mobile_mask()
+        out = []
+        for i, name in enumerate(list(C.SPECIES_NAMES)[: cfg.n_species]):
+            tro = int(cfg.genomes[i][C.IDX["trophic"]])
+            habitat = ("растение", "травоядное", "хищник")[min(tro, 2)] if mobile[i] or tro else "растение"
+            out.append({"i": i + 1, "name": name, "habitat": habitat,
+                        "on": (i + 1) in want})
+        return out
+
+    def seed(self, state, cfg, xp, rng, count=None, gen=0):
+        """Подсев спор и существ на поверхность: те же виды, что и в начале."""
+        from ..backend import to_cpu
+        n = cfg.n
+        relief = np.asarray(state.get("relief"))
+        if relief is None or relief.shape != (n, n):
+            return 0
+        species = to_cpu(state["species"]).copy()
+        energy = to_cpu(state["energy"]).copy()
+        allowed = sorted(allowed_species(cfg))
+        if not allowed:
+            return 0
+        mobile = cfg.mobile_mask()
+        count = int(count if count is not None else getattr(cfg, "reseed_count", 200))
+        rng_cpu = np.random.default_rng((cfg.seed_mut ^ 0x5bf03635) + gen)
+        xs = rng_cpu.integers(0, n, count)
+        ys = rng_cpu.integers(0, n, count)
+        zs = np.clip(relief[xs, ys], 0, n - 1)
+        pick = np.asarray(allowed)[rng_cpu.integers(0, len(allowed), count)]
+        free = species[xs, ys, zs] == 0
+        xs, ys, zs, pick = xs[free], ys[free], zs[free], pick[free]
+        if len(xs) == 0:
+            return 0
+        species[xs, ys, zs] = pick.astype(species.dtype)
+        is_anim = mobile[pick - 1]
+        energy[xs, ys, zs] = np.where(is_anim, cfg.start_energy, cfg.plant_energy)
+        state["species"] = xp.asarray(species)
+        state["energy"] = xp.asarray(energy)
+        state["last_reseed"] = gen
+        return int(len(xs))
 
     def species_names(self, cfg):
         return list(C.SPECIES_NAMES)[: cfg.n_species]
@@ -44,6 +93,8 @@ class EcologyRules(Rules):
     def to_json(self, cfg, state=None):
         j = cfg.to_json()
         j["engine"] = self.name
+        j["starters"] = self.starters_json(cfg)
+        j["reseed"] = seeding_json(cfg)
         return j
 
     def apply_genomes(self, cfg, state, genomes, xp):
