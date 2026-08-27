@@ -11,6 +11,8 @@ docs/engines/<name>.md. Ниже — список известных; поряд
 
 import importlib
 
+import numpy as np
+
 ENGINES = {
     "ecology": "life_cube.engines.ecology",
     "lichen": "life_cube.engines.lichen",
@@ -35,6 +37,50 @@ def list_engines():
         r = get_rules(name)
         out.append({"name": name, "title": r.title, "summary": r.summary})
     return out
+
+
+def fork_dynamic(state, cfg, xp, sid, genome, gen, share=0.3, rng=None):
+    """Ответвить новый вид от живущего (для движков с динамическими видами).
+
+    Правка генома «на месте» переписывает вид целиком и стирает то, что
+    отобралось эволюцией. Форк вместо этого заводит НОВЫЙ id с родословной
+    (parent = sid) и перекрашивает в него часть клеток родителя — иначе вид с
+    нулевым населением тут же сочтут вымершим и id вернётся в пул.
+
+    Возвращает (new_sid, сколько клеток перекрашено).
+    """
+    from ..backend import to_cpu
+
+    reg = state.get("registry") or {}
+    if sid not in reg:
+        raise ValueError(f"вид #{sid} не живёт — ответвлять не от чего")
+    if not state.get("free_ids"):
+        raise ValueError("свободных номеров видов не осталось: подожди, пока кто-нибудь вымрет")
+    g = np.asarray(genome, dtype=np.float32).ravel()
+    width = int(np.asarray(cfg.genomes).shape[1])
+    if g.size != width:
+        raise ValueError(f"геном: ожидается {width} чисел, пришло {g.size}")
+
+    species = to_cpu(state["species"])
+    mine = np.argwhere(species == sid)
+    if len(mine) == 0:
+        raise ValueError(f"у вида #{sid} нет живых клеток")
+    new_sid = state["free_ids"].pop(0)
+    cfg.genomes[new_sid - 1] = g
+    reg[new_sid] = {"parent": int(sid), "born": int(gen), "died": None,
+                    "genome": g.tolist(), "peak": 1, "changed": "конструктор"}
+
+    share = float(min(max(share, 0.0), 1.0))
+    k = max(1, int(round(len(mine) * share)))
+    rng_cpu = state.get("rng_cpu")
+    if rng_cpu is None:
+        rng_cpu = np.random.default_rng(gen)
+    pick = mine[rng_cpu.choice(len(mine), size=min(k, len(mine)), replace=False)]
+    species = species.copy()
+    species[pick[:, 0], pick[:, 1], pick[:, 2]] = new_sid
+    state["species"] = xp.asarray(species)
+    state["genomes"] = xp.asarray(cfg.genomes)
+    return int(new_sid), int(len(pick))
 
 
 def seeding_json(cfg):
@@ -86,6 +132,20 @@ class Rules:
     def randomize(self, cfg, rng):
         """-> новая таблица геномов (случайная, но осмысленная)."""
         raise NotImplementedError
+
+    # --- конструктор ------------------------------------------------------
+    # Движки с фиксированными видами правят геном «на месте»; движки, где виды
+    # рождаются сами, умеют ещё и ответвлять новый вид от живущего.
+    can_fork = False
+
+    def fork_species(self, cfg, state, sid, genome, xp, gen=0, share=0.3):
+        """-> (новый id, сколько клеток перекрашено)."""
+        raise ValueError("этот движок не умеет ответвлять виды: "
+                         "виды здесь фиксированы, правь геном на месте")
+
+    def gene_docs(self):
+        """{ген: человеческое описание} для карточки конструктора."""
+        return {}
 
     # --- засев ------------------------------------------------------------
     # Движок может уметь подсаживать жизнь в уже готовый мир: этим пользуется

@@ -12,6 +12,7 @@
 Клиент шлёт JSON-команды: {"cmd": "pause"|"resume"|"step"|"rate", "value": ..}
                           {"cmd": "reset", "seed_world":..,"seed_mut":..}
                           {"cmd": "seeding", "value": {...}, "restart": bool}
+                          {"cmd": "fork", "id": вид, "value": геном, "share": доля}
 """
 
 import asyncio
@@ -200,7 +201,7 @@ class WebViewer:
         ws = web.WebSocketResponse(max_msg_size=64 * 1024 * 1024)
         await ws.prepare(request)
         snap = self.latest or self.engine.publish(force=True)
-        snap.config_json = self.engine.rules.to_json(self.engine.cfg, self.engine.state)
+        snap.config_json = self._config_json()
         await ws.send_bytes(encode_snapshot(snap, first=True, sound=self.latest_sound))
         self._sent = {}            # новый зритель — следующий общий кадр полный
         self.clients.add(ws)
@@ -278,6 +279,12 @@ class WebViewer:
                 e.reset()
             self.mapper = SoundMapper()
             self._push_config()
+        elif c == "fork":
+            # ответвить новый вид от живущего, не трогая родителя
+            sid, k = e.fork_species(int(cmd["id"]), cmd["value"],
+                                    share=float(cmd.get("share", 0.3)))
+            self._push_config()
+            return {"forked": sid, "cells": k}
         elif c == "seeding":
             # кем заселять мир и нужен ли повторный засев
             v = dict(cmd.get("value") or {})
@@ -302,13 +309,21 @@ class WebViewer:
         else:
             raise ValueError(f"неизвестная команда {c!r}")
 
+    def _config_json(self):
+        """Конфиг движка + то, что знает о движке оркестровка: умеет ли он
+        ответвлять виды и как объясняются его гены (для лаборатории генома)."""
+        rules = self.engine.rules
+        j = rules.to_json(self.engine.cfg, self.engine.state)
+        j["can_fork"] = bool(getattr(rules, "can_fork", False))
+        j["gene_docs"] = rules.gene_docs()
+        return j
+
     def _push_config(self):
         """Разослать клиентам актуальный конфиг (геномы, мир) отдельным
         текстовым сообщением — он меняется редко и в бинарный кадр не входит."""
         if self.loop is None:
             return
-        payload = json.dumps({"config": self.engine.rules.to_json(self.engine.cfg, self.engine.state)},
-                             ensure_ascii=False)
+        payload = json.dumps({"config": self._config_json()}, ensure_ascii=False)
 
         async def send():
             for ws in list(self.clients):

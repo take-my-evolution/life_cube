@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import Rules, seeding_json
+from . import Rules, fork_dynamic, seeding_json
 from ..fields import light_field
 
 GENES = ("light", "stone", "soil", "water", "erode", "enrich", "symbiont",
@@ -198,6 +198,7 @@ class TerraRules(Rules):
     terrain_changes = True
     heightmaps = True
     can_seed = True
+    can_fork = True
 
     WORLD_PARAMS = ("n", "seed_world", "seed_mut", "stone_fraction", "relief_amp",
                     "ridges", "soil_start", "sea_level", "rain_rate", "evaporate",
@@ -771,6 +772,9 @@ class TerraRules(Rules):
             "reseed": seeding_json(cfg),
             "species_total": (len(state["lineage"]) + len(state["registry"])) if state else 1,
         }
+
+    def fork_species(self, cfg, state, sid, genome, xp, gen=0, share=0.3):
+        return fork_dynamic(state, cfg, xp, sid, genome, gen, share)
 
     def apply_genomes(self, cfg, state, genomes, xp, ids=None):
         g = np.asarray(genomes, dtype=np.float32)

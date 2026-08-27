@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import Rules
+from . import Rules, fork_dynamic
 from ..fields import light_field
 
 GENES = ("light", "substrate", "erode", "rain", "up", "absorb",
@@ -124,6 +124,7 @@ class LichenRules(Rules):
     doc = "docs/engines/lichen.md"
     Config = LichenConfig
     dynamic_species = True
+    can_fork = True
     terrain_changes = True
     WORLD_PARAMS = ("n", "seed_world", "seed_mut", "stone_fraction", "hill_radius",
                     "rain_rate", "wet_decay", "wash", "erode_rate", "stress_mut",
@@ -562,6 +563,9 @@ class LichenRules(Rules):
             "species_total": len(state["lineage"]) + len(state["registry"]) if state else 1,
             "lineage_tail": (state["lineage"][-30:] if state else []),
         }
+
+    def fork_species(self, cfg, state, sid, genome, xp, gen=0, share=0.3):
+        return fork_dynamic(state, cfg, xp, sid, genome, gen, share)
 
     def apply_genomes(self, cfg, state, genomes, xp, ids=None):
         g = np.asarray(genomes, dtype=np.float32)

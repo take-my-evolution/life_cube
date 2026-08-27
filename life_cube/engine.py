@@ -82,6 +82,15 @@ class Engine:
                 self.rules.apply_genomes(self.cfg, self.state, genomes, self.xp)
         self.publish(force=True)
 
+    def fork_species(self, sid, genome, share=0.3):
+        """Ответвить новый вид от живущего (движки с динамическими видами).
+        -> (новый id, сколько клеток перекрашено)."""
+        with self._lock:
+            out = self.rules.fork_species(self.cfg, self.state, int(sid), genome,
+                                          self.xp, gen=self.gen, share=float(share))
+        self.publish(force=True)
+        return out
+
     def randomize(self, seed=None):
         """Случайные гены (по правилам движка) + пересоздание мира."""
         rng = np.random.default_rng(seed)
