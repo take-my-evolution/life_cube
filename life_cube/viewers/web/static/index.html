@@ -41,6 +41,45 @@
   .pick.on { background:#2ec7b8; color:#000; }
   .dim { opacity:.35; }
   select { background:#0d0f14; color:var(--fg); border:1px solid var(--line); padding:3px; width:100%; }
+
+  /* --- лаборатория генома: окно поверх куба ------------------------------ */
+  #lab[hidden] { display:none; }
+  #lab { position:fixed; inset:0; background:rgba(6,8,12,.72); display:flex;
+         align-items:center; justify-content:center; z-index:20; }
+  .lab-box { width:min(1080px,94vw); height:min(760px,92vh); background:var(--panel);
+             border:1px solid var(--line); border-radius:8px; display:grid;
+             grid-template-rows:auto 1fr auto; box-shadow:0 20px 60px rgba(0,0,0,.6); }
+  .lab-box > header, .lab-box > footer { display:flex; gap:10px; align-items:center;
+             padding:10px 14px; border-bottom:1px solid var(--line); }
+  .lab-box > footer { border-bottom:none; border-top:1px solid var(--line); flex-wrap:wrap; }
+  .lab-box h2 { margin:0; font-size:15px; font-weight:600; }
+  .lab-body { display:grid; grid-template-columns:260px 1fr; overflow:hidden; }
+  .lab-list { border-right:1px solid var(--line); overflow-y:auto; padding:8px; }
+  .lab-card { overflow-y:auto; padding:12px 14px; }
+  .lab-list input[type=text] { width:100%; background:#0d0f14; color:var(--fg);
+             border:1px solid var(--line); padding:4px 6px; margin-bottom:6px; }
+  .sprow { display:grid; grid-template-columns:12px 1fr auto; gap:7px; align-items:center;
+           padding:5px 6px; border-radius:4px; cursor:pointer; }
+  .sprow:hover { background:#1a1f28; }
+  .sprow.on { background:#22303a; outline:1px solid #2ec7b8; }
+  .sprow .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sprow .pop { color:var(--dim); font-size:11px; }
+  .sprow.dead .nm { color:var(--dim); font-style:italic; }
+  .lab-head { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+  .lab-head .big { font-size:15px; }
+  .chip { display:inline-flex; align-items:center; gap:5px; border:1px solid var(--line);
+          border-radius:99px; padding:2px 9px; font-size:11.5px; color:var(--dim); }
+  .genegrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(310px,1fr)); gap:10px; }
+  .gcard { border:1px solid var(--line); border-radius:6px; padding:8px 10px; background:#0f131a; }
+  .gcard.changed { border-color:#2ec7b8; }
+  .gc-head { display:flex; align-items:center; gap:8px; }
+  .gc-name { flex:1; font-size:12.5px; }
+  .gc-key { color:var(--dim); font-size:10.5px; font-family:ui-monospace,monospace; }
+  .gcard input[type=number] { width:66px; }
+  .gcard input[type=range] { margin:6px 0 2px; }
+  .gc-doc { color:var(--dim); font-size:11px; line-height:1.4; }
+  .icon { width:18px; height:18px; flex:none; stroke:#2ec7b8; fill:none;
+          stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
 </style>
 </head>
 <body>
@@ -84,13 +123,8 @@
     шум <input id="mixN" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.3"></div>
   <canvas id="waterfall" title="спектр-водопад: 64 полосы куба снизу вверх, время слева направо"></canvas>
 
-  <h3>Конструктор существ</h3>
-  <div class="row" id="speciesPick"></div>
-  <div id="genes"></div>
-  <div class="row">
-    <button id="btnApplyGenes">Применить</button>
-    <button id="btnResetGenes">Вернуть исходные</button>
-  </div>
+  <h3>Геном</h3>
+  <div class="row"><button id="btnLab">Лаборатория генома…</button><span class="muted">клавиша G</span></div>
   <div class="row muted" id="geneHint">Геном применяется на лету, мир не пересоздаётся.</div>
 
   <h3>Кем заселять</h3>
@@ -153,6 +187,37 @@
   <div class="row"><button id="btnClearSel">снять выделение</button></div>
   <table id="comps"><thead><tr><th>id</th><th>вид</th><th>клеток</th><th>z</th><th>с пок.</th></tr></thead><tbody></tbody></table>
   <p id="status"></p>
+</div>
+
+<div id="lab" hidden>
+  <div class="lab-box">
+    <header>
+      <h2>Лаборатория генома</h2>
+      <span class="muted" id="labEngine"></span>
+      <span style="flex:1"></span>
+      <button id="labClose">Закрыть</button>
+    </header>
+    <div class="lab-body">
+      <aside class="lab-list">
+        <input type="text" id="labSearch" placeholder="поиск вида">
+        <div class="row" id="speciesPick"></div>
+      </aside>
+      <section class="lab-card">
+        <div class="lab-head" id="labHead"></div>
+        <div id="genes" class="genegrid"></div>
+      </section>
+    </div>
+    <footer>
+      <button id="btnApplyGenes">Применить к виду</button>
+      <button id="btnForkGenes">Ответвить новый вид</button>
+      <button id="btnResetGenes">Вернуть исходные</button>
+      <span class="muted">доля клеток потомку</span>
+      <input type="range" id="labShare" min="0.05" max="1" step="0.05" value="0.3" style="width:120px">
+      <b id="labShareV">30%</b>
+      <span style="flex:1"></span>
+      <span class="muted" id="labStatus"></span>
+    </footer>
+  </div>
 </div>
 
 <script>
@@ -454,6 +519,7 @@ function applyFrame(buf){
     firstFrame=false; }
   $('btnPause').textContent = S.paused ? 'Продолжить' : 'Пауза'; $('btnPause').classList.toggle('on', S.paused);
   rebuildInstances(); renderTable(); drawPops(); dirty=true;
+  labTick();
   S.sound = hdr.sound; Audio.apply(hdr.sound); WF.push(hdr.sound);
   S.connected=true;
 }
@@ -462,7 +528,9 @@ function connect(){
   ws=new WebSocket(url); ws.binaryType='arraybuffer';
   ws.onmessage=e=>{ if (typeof e.data==='string'){
       try { const m=JSON.parse(e.data); if (m.config){ applyConfig(m.config); $('status').textContent='конфиг обновлён'; return; }
-            if (m.error){ $('status').textContent='ошибка: '+m.error; $('status').style.color='#f2683c'; return; } } catch(err){}
+            if (m.ok){ labSay(m.ok.forked ? `ответвлён вид #${m.ok.forked}: ${m.ok.cells} клеток перекрашено` : 'готово'); return; }
+            if (m.error){ $('status').textContent='ошибка: '+m.error; $('status').style.color='#f2683c';
+                          labSay('ошибка: '+m.error, true); return; } } catch(err){}
       $('status').textContent=e.data; return; }
     applyFrame(e.data); };
   ws.onopen=()=>{ $('status').textContent='подключено'; };
@@ -475,33 +543,154 @@ const CFG = { data: null, pick: 1, edited: null, initial: null };
 const PLANT_GENES = new Set(["absorb","up","birth","need","water","branch"]);
 const ANIMAL_GENES = new Set(["hunt","speed","sense","metabolism","repro","lifespan","armor"]);
 
-function speciesButtons(){
-  const box=$('speciesPick'); box.innerHTML='';
-  CFG.data.names.slice(0,24).forEach((nm,i)=>{
-    const b=document.createElement('button'); b.className='pick'+(i+1===CFG.pick?' on':'');
-    const c=CFG.data.colors[i]||'#888';
-    b.innerHTML=`<span class="sw" style="background:${c}"></span> ${nm}`;
-    b.onclick=()=>{ CFG.pick=i+1; speciesButtons(); geneSliders(); };
-    box.appendChild(b);
-  });
+// --------------------------------------------------- лаборатория генома
+// Значки генов: монохромный набор прямо в файле — одинаково выглядит везде и
+// красится темой (эмодзи в тёмной теме пестрят и зависят от системы).
+const GENE_ICONS = {
+  light:'<circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9 7 7M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/>',
+  absorb:'<circle cx="12" cy="6.5" r="3"/><path d="M4 13h16M7 17h10M9.5 21h5"/>',
+  up:'<path d="M12 21V5M6 11l6-6 6 6"/>',
+  branch:'<path d="M12 21V9M12 13 6.5 7.5M12 13l5.5-5.5"/><circle cx="5.5" cy="6.5" r="1.7"/><circle cx="18.5" cy="6.5" r="1.7"/>',
+  water:'<path d="M12 3s6 6.4 6 10.4A6 6 0 0 1 6 13.4C6 9.4 12 3 12 3z"/>',
+  rain:'<path d="M6.5 13a3.5 3.5 0 0 1 .6-6.9 4.5 4.5 0 0 1 8.5-.4A3.7 3.7 0 0 1 17 13"/><path d="M8 16l-1 3.5M12 16l-1 3.5M16 16l-1 3.5"/>',
+  stone:'<path d="M4 16.5 8.5 6 15 4.5l5 6-2 8H6z"/>',
+  soil:'<path d="M3 9h18M3 14h18M3 19h18"/><circle cx="8" cy="11.5" r="1"/><circle cx="15.5" cy="16.5" r="1"/>',
+  substrate:'<path d="M6 12 9.5 6 15 4.8l4 4.6V12"/><path d="M3 12h18M4 16.5h16M6 21h12"/>',
+  erode:'<path d="M4 17.5 8.5 7 15 5.5l5 6-1 6z"/><path d="M11 17.5 13 13l-2.4-1L14 8.5"/>',
+  enrich:'<circle cx="8" cy="9" r="2.1"/><circle cx="15.5" cy="7.8" r="1.6"/><circle cx="11" cy="15" r="2.3"/><circle cx="17.4" cy="14.6" r="1.4"/>',
+  symbiont:'<circle cx="9" cy="12" r="5"/><circle cx="15" cy="12" r="5"/>',
+  birth:'<path d="M12 21v-7"/><path d="M12 14C9 14 6 12 6 8c4 0 6 2 6 6z"/><path d="M12 14c3 0 6-2 6-6-4 0-6 2-6 6z"/>',
+  need:'<path d="M4 19h16"/><path d="M7.5 19v-7M12 19V7M16.5 19v-4"/><path d="M3 12h18" stroke-dasharray="3 2.5"/>',
+  metabolism:'<path d="M12 22c3.9 0 6-2.6 6-6 0-4-4-5-3-9-3 1-5 3.5-5 6 0-1-.9-2-2-2.6C7 12 6 13.6 6 16c0 3.4 2.1 6 6 6z"/>',
+  repro:'<circle cx="12" cy="12" r="7.5"/><path d="M12 4.5v15"/>',
+  lifespan:'<path d="M7 3h10M7 21h10M7 3c0 5 5 6 5 9s-5 4-5 9M17 3c0 5-5 6-5 9s5 4 5 9"/>',
+  armor:'<path d="M12 3l7 2.8V12c0 5-3.6 7.5-7 9-3.4-1.5-7-4-7-9V5.8z"/>',
+  hunt:'<path d="M4 6.5h16"/><path d="M7.5 6.5 9.5 13l2-6.5M13 6.5l2 7.5 2-7.5"/>',
+  trophic:'<path d="M12 3.5 16 9.5H8z"/><path d="M7 13.5h10M4 19h16"/>',
+  speed:'<path d="M4 7l5 5-5 5M12 7l5 5-5 5"/>',
+  sense:'<circle cx="12" cy="12" r="1.7"/><path d="M7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2"/>',
+  mut:'<path d="M7 4c0 4.5 10 3.5 10 8s-10 3.5-10 8"/><path d="M7.6 8h8.8M7.6 16h8.8"/>',
+};
+const ICON_FALLBACK = '<circle cx="12" cy="12" r="7.5"/><path d="M12 8.5v4M12 15.5h.01"/>';
+function geneIcon(name){
+  return `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${GENE_ICONS[name]||ICON_FALLBACK}</svg>`;
 }
+// живое население вида: у движков с динамическими видами id вида = позиция в pops
+function popOf(sid){ return (S.pops && S.pops[sid-1]) || 0; }
+function labSpeciesIds(){ return CFG.data.ids || CFG.data.names.map((_n,i)=>i+1); }
+
+function speciesButtons(){
+  const box=$('speciesPick'); if(!box||!CFG.data) return;
+  const q=($('labSearch')&&$('labSearch').value||'').trim().toLowerCase();
+  box.innerHTML='';
+  const ids=labSpeciesIds();
+  ids.forEach((sid,i)=>{
+    const nm=CFG.data.names[i]||('вид '+sid);
+    if (q && !nm.toLowerCase().includes(q) && !String(sid).includes(q)) return;
+    const row=document.createElement('div');
+    const pop=popOf(sid);
+    row.className='sprow'+(i+1===CFG.pick?' on':'')+(pop?'':' dead');
+    row.innerHTML=`<span class="sw" style="background:${CFG.data.colors[i]||'#888'}"></span>`+
+                  `<span class="nm" title="${nm}">${nm}</span><span class="pop">${pop||'—'}</span>`;
+    row.onclick=()=>{ CFG.pick=i+1; speciesButtons(); geneSliders(); };
+    box.appendChild(row);
+  });
+  if (!box.children.length) box.innerHTML='<div class="muted">никто не нашёлся</div>';
+}
+
+function labHead(){
+  const box=$('labHead'); if(!box||!CFG.data) return;
+  const i=CFG.pick-1, ids=labSpeciesIds(), sid=ids[i];
+  const nm=CFG.data.names[i]||('вид '+sid);
+  const parts=[`<span class="sw" style="background:${CFG.data.colors[i]||'#888'}"></span>`,
+               `<span class="big">${nm}</span>`,
+               `<span class="chip">клеток ${popOf(sid)}</span>`,
+               `<span class="chip">id ${sid}</span>`];
+  if (CFG.data.species_total) parts.push(`<span class="chip">видов за всё время ${CFG.data.species_total}</span>`);
+  box.innerHTML=parts.join(' ');
+}
+
 function geneSliders(){
-  const box=$('genes'); box.innerHTML='';
-  const g=CFG.edited[CFG.pick-1], f=CFG.data.fields;
-  const mobile = g[f.indexOf('speed')] > 0;
+  const box=$('genes'); if(!box||!CFG.data) return;
+  box.innerHTML='';
+  labHead();
+  const g=CFG.edited[CFG.pick-1], base=CFG.data.genomes[CFG.pick-1]||g, f=CFG.data.fields;
+  const docs=CFG.data.gene_docs||{};
+  // приглушение «неработающих» генов имеет смысл только там, где вид бывает
+  // подвижным (движок «экология»): в «терре» те же имена значат другое, и
+  // metabolism/repro там работают у всех
+  const hasSpeed = f.indexOf('speed') >= 0;
+  const mobile = hasSpeed && g[f.indexOf('speed')] > 0;
   f.forEach((name,gi)=>{
     const [lo,hi,st]=CFG.data.ranges[name]||[0,1,0.01];
-    const row=document.createElement('div'); row.className='gene';
+    const dec = st<0.05?2:(st<1?1:0);
+    const card=document.createElement('div'); card.className='gcard';
     // гены, которые для этого существа не работают, показываем приглушённо
-    const useless = (mobile && PLANT_GENES.has(name)) || (!mobile && ANIMAL_GENES.has(name) && name!=='hunt');
-    if (useless) row.classList.add('dim');
-    row.innerHTML=`<span>${CFG.data.labels[name]||name}</span><b id="gv${gi}">${(+g[gi]).toFixed(st<0.05?2:(st<1?1:0))}</b>`;
-    const inp=document.createElement('input'); inp.type='range'; inp.min=lo; inp.max=hi; inp.step=st; inp.value=g[gi];
-    inp.oninput=e=>{ CFG.edited[CFG.pick-1][gi]=+e.target.value; $('gv'+gi).textContent=(+e.target.value).toFixed(st<0.05?2:(st<1?1:0));
+    const useless = hasSpeed && ((mobile && PLANT_GENES.has(name))
+                                 || (!mobile && ANIMAL_GENES.has(name) && name!=='hunt'));
+    if (useless) card.classList.add('dim');
+    if (Math.abs((+g[gi])-(+base[gi])) > 1e-6) card.classList.add('changed');
+    card.innerHTML =
+      `<div class="gc-head">${geneIcon(name)}<span class="gc-name">${CFG.data.labels[name]||name}</span>`+
+      `<span class="gc-key">${name}</span></div>`;
+    const head=card.firstChild;
+    const num=document.createElement('input');
+    num.type='number'; num.min=lo; num.max=hi; num.step=st; num.value=(+g[gi]).toFixed(dec);
+    const rng=document.createElement('input');
+    rng.type='range'; rng.min=lo; rng.max=hi; rng.step=st; rng.value=g[gi];
+    const set=v=>{ v=Math.min(hi,Math.max(lo,+v)); CFG.edited[CFG.pick-1][gi]=v;
+      num.value=v.toFixed(dec); rng.value=v;
+      card.classList.toggle('changed', Math.abs(v-(+base[gi]))>1e-6);
       if (name==='speed') geneSliders(); };
-    row.appendChild(inp); box.appendChild(row);
+    rng.oninput=e=>set(e.target.value);
+    num.onchange=e=>set(e.target.value);
+    head.appendChild(num);
+    card.appendChild(rng);
+    const doc=document.createElement('div'); doc.className='gc-doc';
+    doc.textContent=docs[name]||(useless?'у этого существа ген не работает':'');
+    card.appendChild(doc);
+    box.appendChild(card);
   });
 }
+
+// пока окно открыто, население видов в нём должно жить, а не застывать на
+// момент открытия; полная перерисовка списка стоит дёшево, но не каждый кадр
+let labFrames = 0;
+function labTick(){
+  const lab=$('lab');
+  if (!lab || lab.hasAttribute('hidden')) return;
+  if ((labFrames++ % 8) === 0){ speciesButtons(); labHead(); }
+}
+function labSay(text, bad){
+  const el=$('labStatus'); if(!el) return;
+  el.textContent=text||''; el.style.color = bad ? '#f2683c' : '';
+}
+function labOpen(on){
+  const lab=$('lab');
+  if (on===undefined) on = lab.hasAttribute('hidden');
+  if (on){ lab.removeAttribute('hidden'); speciesButtons(); geneSliders(); labButtons(); }
+  else lab.setAttribute('hidden','');
+}
+function labButtons(){
+  const fork=$('btnForkGenes'), can=!!(CFG.data&&CFG.data.can_fork);
+  fork.disabled=!can;
+  fork.title = can ? 'создать потомка с этим геномом, не трогая исходный вид'
+                   : 'в этом движке виды фиксированы — ответвлять не от чего';
+  $('labEngine').textContent = CFG.data ? (CFG.data.engine+(can?' · виды рождаются сами':' · виды фиксированы')) : '';
+}
+$('btnLab').onclick=()=>labOpen(true);
+$('labClose').onclick=()=>labOpen(false);
+$('lab').onclick=e=>{ if (e.target.id==='lab') labOpen(false); };
+$('labSearch').oninput=()=>speciesButtons();
+$('labShare').oninput=e=>{ $('labShareV').textContent=Math.round(e.target.value*100)+'%'; };
+window.addEventListener('keydown', e=>{
+  // Escape закрывает окно откуда угодно — в том числе из поля поиска, где
+  // курсор оказывается чаще всего
+  if (e.key==='Escape'){ labOpen(false); if (e.target.blur) e.target.blur(); return; }
+  if (e.target.tagName==='INPUT'||e.target.tagName==='SELECT'||e.target.isContentEditable) return;
+  if (e.key==='g'||e.key==='G'||e.key==='п'||e.key==='П') labOpen();
+});
+
 const WORLD_LABELS = { n:'размер куба (нужен пересоздание)', seed_world:'сид мира', seed_mut:'сид мутаций',
   seed_density:'плотность засева', animal_share:'доля животных в засеве', stone_fraction:'доля камня по высоте',
   relief_amp:'размах рельефа', p_shock:'выветривание', p_dissolve:'растворение камня',
@@ -588,8 +777,13 @@ $('btnRandom').onclick = ()=>{ // случайные гены без перез�
   CFG.edited = CFG.edited.map(row=>row.map((v,gi)=>{ const [lo,hi]=CFG.data.ranges[f[gi]]||[0,1]; if (f[gi]==='trophic'||f[gi]==='speed') return v; return +(lo+Math.random()*(hi-lo)).toFixed(3); }));
   geneSliders(); send({cmd:'genomes', value:CFG.edited, ids:CFG.ids}); };
 $('btnRandomRestart').onclick = ()=>{ $('status').textContent='случайные параметры + новый мир…'; send({cmd:'randomize', seed: Math.floor(Math.random()*1e9)}); };
-$('btnApplyGenes').onclick=()=>send({cmd:'genomes', value:CFG.edited, ids:CFG.ids});
-$('btnResetGenes').onclick=()=>{ if (CFG.initial.length!==CFG.edited.length){ $('status').textContent='число видов изменилось — исходные не применить'; return; } CFG.edited=JSON.parse(JSON.stringify(CFG.initial)); geneSliders(); send({cmd:'genomes', value:CFG.edited, ids:CFG.ids}); };
+$('btnApplyGenes').onclick=()=>{ send({cmd:'genomes', value:CFG.edited, ids:CFG.ids});
+  labSay('геном вида переписан на месте'); };
+$('btnForkGenes').onclick=()=>{ if (!(CFG.data&&CFG.data.can_fork)) return;
+  const sid=labSpeciesIds()[CFG.pick-1];
+  labSay('ответвляю…');
+  send({cmd:'fork', id:sid, value:CFG.edited[CFG.pick-1], share:+$('labShare').value}); };
+$('btnResetGenes').onclick=()=>{ if (CFG.initial.length!==CFG.edited.length){ labSay('число видов изменилось — исходные не применить', true); return; } CFG.edited=JSON.parse(JSON.stringify(CFG.initial)); geneSliders(); send({cmd:'genomes', value:CFG.edited, ids:CFG.ids}); labSay('вернул исходные геномы'); };
 $('btnApplyWorld').onclick=()=>{ $('status').style.color=''; $('status').textContent='пересоздаю мир…'; send({cmd:'world', value:CFG.world, reseed:true}); };
 $('btnRandomSeed').onclick=()=>{ CFG.world.seed_world=Math.floor(Math.random()*1e9); CFG.world.seed_mut=Math.floor(Math.random()*1e9);
   worldControls(); send({cmd:'world', value:CFG.world, reseed:true}); };
@@ -701,6 +895,7 @@ const WF = { canvas: $('waterfall'), col: 0, w: 240, h: 64, ctx: null, img: null
 // --------------------------------------------- API для тестов и скриптов
 window.viewer = {
   S, gl, applyFrame, Audio, WF, CFG, COL, draw: ()=>{ dirty=false; draw(); },
+  send, labOpen, geneSliders, speciesButtons,
   set(k,v){ S[k]=v; dirty=true; }, setView(v){ setView(v); dirty=true; },
   readPixels(){ resize(); draw(); const w=canvas.width,h=canvas.height; const px=new Uint8Array(w*h*4); gl.readPixels(0,0,w,h,gl.RGBA,gl.UNSIGNED_BYTE,px); return {w,h,px}; },
   // подсчёт пикселей по ближайшему цвету вида (для тестов): возвращает {bg, stone, s1..s4, other}

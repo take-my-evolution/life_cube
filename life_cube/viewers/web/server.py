@@ -218,8 +218,12 @@ class WebViewer:
                 # мира занимает секунды, и в цикле сервера он вешал ВСЁ — ни
                 # страница, ни другие клиенты не отвечали (наступали).
                 try:
-                    await asyncio.get_running_loop().run_in_executor(
+                    out = await asyncio.get_running_loop().run_in_executor(
                         None, self.handle, cmd)
+                    # команды, которым есть что сказать в ответ (например форк:
+                    # какой id получился), отвечают словарём — шлём его автору
+                    if isinstance(out, dict):
+                        await ws.send_str(json.dumps({"ok": out}, ensure_ascii=False))
                 except Exception as e:
                     await ws.send_str(json.dumps({"error": str(e)}))
         finally:

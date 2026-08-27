@@ -65,6 +65,15 @@ def page(server):
         browser.close()
 
 
+@pytest.fixture(autouse=True)
+def _lab_closed(page):
+    """Лаборатория генома — модальное окно поверх всего: забытое открытым, оно
+    перехватывает клики следующего теста. Закрываем до и после каждого."""
+    page.evaluate("window.viewer && viewer.labOpen(false)")
+    yield
+    page.evaluate("window.viewer && viewer.labOpen(false)")
+
+
 def hist(page):
     return page.evaluate("viewer.histogram()")
 
@@ -179,13 +188,16 @@ def test_sound_frame_reaches_client_and_audio_graph(page, server):
 
 
 def test_constructor_panel_edits_genomes(page, server):
-    """Панель конструктора приходит с конфигом и правит геномы на сервере."""
+    """Лаборатория генома приходит с конфигом и правит геномы на сервере."""
+    page.evaluate("viewer.labOpen(true)")
     cfg = page.evaluate("viewer.CFG.data")
     assert cfg and len(cfg["fields"]) == 14 and len(cfg["genomes"]) == len(cfg["names"])
     assert "травоядное" in cfg["names"] and "хищник" in cfg["names"]
-    # ползунки нарисованы для выбранного вида
+    # карточка на каждый ген: значок, ползунок, число и описание
+    assert page.locator("#genes .gcard").count() == 14
     assert page.locator("#genes input[type=range]").count() == 14
-    assert page.locator("#speciesPick button").count() == len(cfg["names"])
+    assert page.locator("#genes .gcard svg.icon").count() == 14
+    assert page.locator("#speciesPick .sprow").count() == len(cfg["names"])
     # правим ген через API панели и применяем
     gi = cfg["fields"].index("metabolism")
     page.evaluate(f"viewer.CFG.edited[6][{gi}] = 0.123")
@@ -294,3 +306,60 @@ def test_starters_and_reseed_panel(page, server):
     page.evaluate("document.getElementById('reseedOn').checked = false;"
                   " document.getElementById('reseedOn').onchange()")
     page.wait_for_timeout(300)
+
+
+def test_genome_lab_opens_and_describes_genes(page, server):
+    """Окно открывается кнопкой и клавишей, у каждого гена есть описание,
+    а в «экологии» ответвление недоступно — виды здесь фиксированы."""
+    page.evaluate("viewer.labOpen(false)")
+    assert page.locator("#lab").is_hidden()
+    page.click("#btnLab")
+    assert page.locator("#lab").is_visible()
+    docs = page.evaluate("viewer.CFG.data.gene_docs")
+    fields = page.evaluate("viewer.CFG.data.fields")
+    assert all(f in docs and len(docs[f]) > 20 for f in fields), docs
+    texts = page.evaluate("Array.from(document.querySelectorAll('#genes .gc-doc')).map(e=>e.textContent)")
+    assert sum(bool(t.strip()) for t in texts) == len(fields)
+    assert page.evaluate("document.getElementById('btnForkGenes').disabled") is True
+    # выбор вида в списке меняет карточку
+    page.locator("#speciesPick .sprow").nth(6).click()
+    assert page.evaluate("viewer.CFG.pick") == 7
+    assert "травоядное" in page.locator("#labHead").inner_text()
+    # поиск фильтрует список
+    page.fill("#labSearch", "дерев")
+    assert page.locator("#speciesPick .sprow").count() == 1
+    page.fill("#labSearch", "")
+    page.keyboard.press("Escape")
+    assert page.locator("#lab").is_hidden()
+
+
+def test_genome_lab_forks_species_in_terra(page, server):
+    """В «терре» виды рождаются сами — там кнопка «Ответвить» работает и
+    создаёт потомка с родословной, не трогая родителя."""
+    e = server["engine"]
+    page.evaluate("viewer.CFG.world.n = 32")
+    page.evaluate("viewer.send({cmd:'engine', value:'terra', n:32})")
+    page.wait_for_function("viewer.CFG.data && viewer.CFG.data.engine === 'terra'", timeout=20000)
+    try:
+        for _ in range(30):
+            e.advance()
+        e.publish(force=True)
+        page.evaluate("viewer.send({cmd:'config'})")
+        page.wait_for_timeout(400)
+        page.evaluate("viewer.labOpen(true)")
+        assert page.evaluate("document.getElementById('btnForkGenes').disabled") is False
+        before = sorted(e.state["registry"])
+        page.evaluate("viewer.CFG.pick = 1")
+        page.evaluate("viewer.geneSliders()")
+        page.click("#btnForkGenes")
+        page.wait_for_timeout(800)
+        after = sorted(e.state["registry"])
+        assert len(after) > len(before)
+        new = [s for s in after if s not in before][0]
+        assert e.state["registry"][new]["parent"] == before[0]
+        assert "ответвлён вид" in page.locator("#labStatus").inner_text()
+        page.evaluate("viewer.labOpen(false)")
+    finally:
+        page.evaluate("viewer.CFG.world.n = 32")
+        page.evaluate("viewer.send({cmd:'engine', value:'ecology', n:32})")
+        page.wait_for_function("viewer.CFG.data && viewer.CFG.data.engine === 'ecology'", timeout=20000)

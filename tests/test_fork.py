@@ -88,3 +88,4 @@ def test_server_fork_command():
     assert out["forked"] != sid and out["cells"] > 0
     j = v._config_json()
     assert j["can_fork"] is True and out["forked"] in j["ids"]
+    assert j["gene_docs"] and all(len(v) > 20 for v in j["gene_docs"].values())
