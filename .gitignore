@@ -8,3 +8,4 @@ dist/
 *.npz
 runs/
 logs/
+!logs/.gitkeep
