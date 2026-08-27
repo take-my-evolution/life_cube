@@ -6,6 +6,7 @@ life_cube/
     __init__.py       реестр и интерфейс Rules
     ecology.py        обёртка над config/world/fields/step/motion
     lichen.py         самостоятельный движок (свой Config, мир, шаг, гены)
+    terra.py          горы, реки, почва, бактерии и растения
   config.py world.py fields.py step.py motion.py   — модель «экология»
   engine.py           оркестровка: цикл, пауза/шаг/скорость, снимки, смена движка
   snapshot.py         разреженный снимок, организмы (компоненты), устойчивые id
@@ -27,6 +28,9 @@ legacy/               исходный монолит cube_ecology.py (этал�
 | `species_names/colors(cfg[, state])` | подписи и палитра; у динамических видов — от состояния |
 | `to_json(cfg, state)` | описание для панели: `fields`, `labels`, `ranges`, `genomes`, `world`, (`ids`) |
 | `apply_genomes`, `randomize`, `world_params` | правка на лету, случайные гены, список ручек мира |
+| `gene_docs()` | `{ген: описание}` для карточек лаборатории генома |
+| `seed(state, cfg, xp, rng, count, gen)` | подсадить жизнь (повторный засев); флаг `can_seed` |
+| `fork_species(cfg, state, sid, genome, xp, gen, share)` | ответвить потомка от живущего вида; флаг `can_fork` |
 | флаги `dynamic_species`, `terrain_changes` | слать имена видов и рельеф каждый кадр |
 
 Всё остальное — общее: `Engine` крутит любой движок, `snapshot.py` видит только
