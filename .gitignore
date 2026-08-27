@@ -7,3 +7,4 @@ dist/
 *.png
 *.npz
 runs/
+logs/
