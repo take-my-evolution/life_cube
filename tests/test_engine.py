@@ -51,7 +51,7 @@ def test_engine_reset_changes_world():
     e = make_engine(components=False)
     e.run(max_gens=5)
     e.reset(Config(n=16, seed_density=0.05, seed_world=99))
-    assert e.gen == 0 and e.hist == []
+    assert e.gen == 0 and len(e.hist) == 0
     assert e.last_snapshot.gen == 0
 
 
@@ -66,5 +66,7 @@ def test_protocol_roundtrip():
     assert np.array_equal(labels, snap.labels)
     assert len(hdr["relief"]) == 16 and hdr["species_names"][0] == "мох"
     assert len(hdr["components"]) == len(snap.components)
-    # во втором кадре рельефа нет — экономим
-    assert "relief" not in decode_snapshot(encode_snapshot(snap))[0]
+    # во втором кадре рельеф не повторяется — шлём только изменившееся
+    sent = {}
+    decode_snapshot(encode_snapshot(snap, first=True, sent=sent))
+    assert "relief" not in decode_snapshot(encode_snapshot(snap, sent=sent))[0]

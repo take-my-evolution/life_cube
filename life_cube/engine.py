@@ -7,6 +7,9 @@
 
 import threading
 import time
+from collections import deque
+
+import numpy as np
 
 from .backend import get_backend, to_cpu
 from .config import Config
@@ -18,6 +21,9 @@ class Engine:
     # выше этого числа клеток разметка организмов (scipy.label на CPU) стоит
     # секунды и душит и симуляцию, и веб-сервер: отключаем её автоматически
     COMPONENTS_CELL_LIMIT = 6_000_000
+    HIST_KEEP = 600          # сколько последних поколений держим поштучно
+    HIST_LONG = 400          # столько точек прореженной длинной истории
+    HIST_EVERY = 50          # каждое k-е поколение попадает в длинную историю
 
     def __init__(self, cfg: Config = None, use_gpu=False, rate=10.0,
                  snapshot_every=1, components=True, yield_ms=0.5,
@@ -36,7 +42,11 @@ class Engine:
         self.tracker = Tracker() if components else None
         self.paused = False
         self.running = False
-        self.hist = []
+        # История: последние HIST_KEEP поколений точно + прореженная длинная.
+        # Раньше это был безграничный список: на 2 млн поколений он занимал
+        # сотни мегабайт и копировался ПОД ЗАМКОМ на каждый кадр (рывки).
+        self.hist = deque(maxlen=self.HIST_KEEP)
+        self.hist_long = deque(maxlen=self.HIST_LONG)   # каждое HIST_EVERY-е
         self.listeners = []
         self._step_request = 0
         self._lock = threading.Lock()
@@ -72,7 +82,6 @@ class Engine:
 
     def randomize(self, seed=None):
         """Случайные гены (по правилам движка) + пересоздание мира."""
-        import numpy as np
         rng = np.random.default_rng(seed)
         with self._lock:
             self.cfg.genomes = self.rules.randomize(self.cfg, rng)
@@ -116,7 +125,8 @@ class Engine:
                     pass
             self.state, self.relief = self.rules.init_state(self.cfg, self.xp)
             self.gen = 0
-            self.hist = []
+            self.hist.clear()
+            self.hist_long.clear()
             self.tracker = Tracker() if self.components else None
         self.publish(force=True)
 
@@ -126,6 +136,8 @@ class Engine:
             pops = self.rules.step(self.state, self.cfg, self.xp, self.correlate, self.gen)
             self.gen += 1
             self.hist.append(pops)
+            if self.gen % self.HIST_EVERY == 0:
+                self.hist_long.append(pops)
         return pops
 
     def publish(self, force=False, components=None):  # noqa: C901
@@ -136,11 +148,13 @@ class Engine:
         # копируем массивы под замком (быстро), тяжёлую разметку делаем без него,
         # чтобы симуляция не ждала CPU
         t_start = time.perf_counter()
+        heightmaps = getattr(self.rules, "heightmaps", False)
         with self._lock:
             gen = self.gen
             cpu = {"species": to_cpu(self.state["species"]).copy(),
-                   "soil": to_cpu(self.state["soil"]).copy()}
-            hist = list(self.hist)
+                   # при картах высот почва не нужна поклеточно
+                   "soil": (np.zeros((1, 1, 1), bool) if heightmaps
+                            else to_cpu(self.state["soil"]).copy())}
             n_species = self.rules.n_species(self.cfg)
         want = self.components if components is None else (components and self.components)
         if want and self.cfg.n ** 3 > self.COMPONENTS_CELL_LIMIT:
@@ -150,12 +164,19 @@ class Engine:
         if not want and self.last_snapshot is not None:
             # переиспользуем прошлую разметку организмов: она обновляется реже
             snap.components = self.last_snapshot.components
-        # у движков с меняющимся рельефом карту высот обновляем в каждом снимке
-        if getattr(self.rules, "terrain_changes", False):
-            self.relief = to_cpu(self.state["stone_h"]).copy()
-            snap.relief_dirty = True
+        # движки с картами высот отдают подложку картами, а не поклеточно
+        if getattr(self.rules, "heightmaps", False):
+            with self._lock:
+                snap.stone_h = to_cpu(self.state["stone_h"]).astype("uint16")
+                snap.soil_h = to_cpu(self.state["soil_h"]).astype("uint16")
+                w = self.state.get("water_h")
+                snap.water_h = to_cpu(w).astype("uint16") if w is not None else None
+            snap.soil_coords = None
+            self.relief = snap.stone_h
         snap.relief = self.relief
-        snap.hist = hist
+        # график строится по прореженной истории + хвосту: это ~200 точек
+        # вместо тысяч, кадр не раздувается
+        snap.hist = self.history_series()
         snap.species_names = self.rules.species_names(self.cfg, self.state) \
             if getattr(self.rules, "dynamic_species", False) else self.rules.species_names(self.cfg)
         snap.species_colors = self.rules.species_colors(self.cfg, self.state) \
@@ -180,6 +201,18 @@ class Engine:
         for fn in self.listeners:
             fn(snap)
         return snap
+
+    def history_series(self, points=160):
+        """Компактная история для графика: длинная прореженная + хвост."""
+        long_part = list(self.hist_long)
+        tail = list(self.hist)
+        if len(tail) > points:
+            step_t = len(tail) // points + 1
+            tail = tail[::step_t]
+        if len(long_part) > points:
+            step_l = len(long_part) // points + 1
+            long_part = long_part[::step_l]
+        return long_part + tail
 
     def run(self, max_gens=None, stop_event=None):
         """Цикл: держит целевую скорость, уважает паузу и одиночные шаги."""

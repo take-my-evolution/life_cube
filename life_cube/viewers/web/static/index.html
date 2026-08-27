@@ -76,7 +76,8 @@
   </div>
   <div class="row"><span class="muted">Громкость</span> <span id="volLbl">0.5</span></div>
   <input id="vol" type="range" min="0" max="1" step="0.01" value="0.5">
-  <div class="row"><span class="muted">Базовая частота</span> <span id="hzLbl">55 Гц</span></div>
+  <div class="row"><label class="sp"><input type="checkbox" id="autoHz" checked> тон из населения</label>
+    <span class="muted" id="hzLbl">55 Гц</span></div>
   <input id="baseHz" type="range" min="20" max="220" step="1" value="55">
   <div class="row muted">микс: гармоники <input id="mixH" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.7">
     голоса <input id="mixV" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.6">
@@ -152,7 +153,7 @@ const S = {   // состояние вьюера (window.viewer читает/п�
   proj: 'persp', yaw: 0.8, pitch: 0.55, dist: 0, target: [0,0,0], pan:[0,0], nsp: 4,
   clipZ: 1e9, slab: 0, speciesMask: new Array(256).fill(1), colorMode: 'species',
   minSize: 1, ghost: true, selected: 0, showStone: true, showSoil: true,
-  paused: false, rate: 0, measured: 0, frames: 0, connected: false,
+  paused: false, rate: 0, measured: 0, frames: 0, connected: false, autoHz: true,
 };
 const $ = id => document.getElementById(id);
 
@@ -169,10 +170,11 @@ layout(location=2) in vec3 aCell;     // позиция клетки (uint16 -> 
 layout(location=3) in float aSpecies; // 0..4
 layout(location=4) in float aLabel;   // id организма
 layout(location=5) in float aSize;    // размер организма
-layout(location=6) in float aKind;    // 0 живая, 1 камень, 2 почва
+layout(location=6) in float aKind;    // 0 живая, 1 камень, 2 почва, 3 вода
+layout(location=7) in float aHeight;  // высота столба в клетках (1 у живых)
 uniform mat4 uVP;
 uniform float uMask[256];             // маска видов 1..256
-uniform float uClipZ, uSlabLo, uSlabHi, uMinSize, uSelected, uColorMode, uGhost, uShowStone, uShowSoil;
+uniform float uClipZ, uSlabLo, uSlabHi, uMinSize, uSelected, uColorMode, uGhost, uShowStone, uShowSoil, uWaterPass;
 uniform vec3 uCol[256];
 out vec3 vCol; out vec3 vNrm; out float vGhost;
 vec3 hashCol(float id){ float h = fract(sin(id*12.9898)*43758.5453); float h2 = fract(sin(id*78.233)*12345.678);
@@ -188,22 +190,26 @@ void main(){
     bool filt = (m < 0.5) || (aSize < uMinSize) || (uSelected > 0.5 && abs(aLabel-uSelected) > 0.5);
     if (filt) { if (uGhost > 0.5) ghost = 1.0; else visible = 0.0; }
     col = uColorMode < 0.5 ? uCol[int(aSpecies) & 255] : hashCol(aLabel);
-  } else if (aKind < 1.5) { col = vec3(0.23,0.24,0.29); if (uShowStone < 0.5) visible = 0.0; }
-  else { col = vec3(0.42,0.29,0.21); if (uShowSoil < 0.5) visible = 0.0; }
+  } else if (aKind < 1.5) { col = vec3(0.30,0.31,0.35); if (uShowStone < 0.5) visible = 0.0; }
+  else if (aKind < 2.5) { col = vec3(0.35,0.25,0.16); if (uShowSoil < 0.5) visible = 0.0; }
+  else { col = vec3(0.16,0.40,0.72); }
+  // вода рисуется вторым, полупрозрачным проходом
+  if ((uWaterPass > 0.5) != (aKind > 2.5)) visible = 0.0;
   float sc = ghost > 0.5 ? 0.28 : 1.0;
-  vec3 p = aCell + 0.5 + (aPos - 0.5) * sc;
+  vec3 p = aCell + vec3(0.5, 0.5, 0.0) + vec3((aPos.xy - 0.5) * sc, aPos.z * aHeight * sc);
   gl_Position = visible > 0.5 ? uVP * vec4(p, 1.0) : vec4(2.0, 2.0, 2.0, 1.0);
   vCol = col; vNrm = aNrm; vGhost = ghost;
 }`;
 const FS = `#version 300 es
 precision highp float;
 in vec3 vCol; in vec3 vNrm; in float vGhost; out vec4 o;
+uniform float uWaterPass;
 void main(){
   vec3 L = normalize(vec3(0.4, 0.3, 0.85));
   float d = 0.55 + 0.45 * max(dot(normalize(vNrm), L), 0.0);
   vec3 c = vCol * d;
   if (vGhost > 0.5) c = mix(vec3(0.05,0.06,0.08), c, 0.35);
-  o = vec4(c, 1.0);
+  o = vec4(c, uWaterPass > 0.5 ? 0.55 : 1.0);
 }`;
 function compile(t, s){ const sh = gl.createShader(t); gl.shaderSource(sh, s); gl.compileShader(sh);
   if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh)); return sh; }
@@ -211,7 +217,7 @@ const prog = gl.createProgram();
 gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
 gl.linkProgram(prog); if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
 gl.useProgram(prog);
-const U = {}; for (const nm of ['uVP','uMask','uClipZ','uSlabLo','uSlabHi','uMinSize','uSelected','uColorMode','uGhost','uShowStone','uShowSoil'])
+const U = {}; for (const nm of ['uVP','uMask','uClipZ','uSlabLo','uSlabHi','uMinSize','uSelected','uColorMode','uGhost','uShowStone','uShowSoil','uWaterPass'])
   U[nm] = gl.getUniformLocation(prog, nm);
 const uColLoc = gl.getUniformLocation(prog, 'uCol');
 function uploadPalette(){ const arr=new Float32Array(256*3); for (let i=0;i<256;i++){ const c=COL[i]||[0.6,0.6,0.6]; arr[i*3]=c[0]; arr[i*3+1]=c[1]; arr[i*3+2]=c[2]; } gl.uniform3fv(uColLoc, arr); }
@@ -230,30 +236,49 @@ function buf(loc, data, size, type, divisor, norm=false){ const b = gl.createBuf
 buf(0, new Float32Array(cubeV), 3, gl.FLOAT, 0); buf(1, new Float32Array(cubeN), 3, gl.FLOAT, 0);
 const B = { cell: buf(2, new Uint16Array(3), 3, gl.UNSIGNED_SHORT, 1), sp: buf(3, new Uint8Array(1), 1, gl.UNSIGNED_BYTE, 1),
             lab: buf(4, new Float32Array(1), 1, gl.FLOAT, 1), size: buf(5, new Float32Array(1), 1, gl.FLOAT, 1),
-            kind: buf(6, new Uint8Array(1), 1, gl.UNSIGNED_BYTE, 1) };
+            kind: buf(6, new Uint8Array(1), 1, gl.UNSIGNED_BYTE, 1),
+            height: buf(7, new Float32Array(1), 1, gl.FLOAT, 1) };
 let instCount = 0, liveCount = 0;
 gl.enable(gl.DEPTH_TEST); gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK); gl.clearColor(0.051,0.059,0.078,1);
 
 // --------------------------------------------------------- сборка буферов
 function rebuildInstances(){
-  const n = S.n, k = S.k, m = S.soil ? S.soil.length/3 : 0;
-  const stoneCount = S.relief ? n*n : 0;
-  const total = k + m + stoneCount;
+  const n = S.n, k = S.k;
+  const heightmaps = !!S.stoneH;
+  const m = (!heightmaps && S.soil) ? S.soil.length/3 : 0;
+  const cols = n*n;
+  // подложка — один инстанс на столбец (камень), плюс почва и вода столбами.
+  // Раньше камень рисовался одной клеткой на столбец — отсюда «тонкая корка»
+  const terrain = heightmaps ? cols*3 : (S.relief ? cols : 0);
+  const total = k + m + terrain;
   const cell = new Uint16Array(total*3), sp = new Uint8Array(total), lab = new Float32Array(total),
-        size = new Float32Array(total), kind = new Uint8Array(total);
-  // размеры организмов — считаем на клиенте по меткам
-  const sizes = new Map(); for (let i=0;i<k;i++) sizes.set(S.labels[i], (sizes.get(S.labels[i])||0)+1);
+        size = new Float32Array(total), kind = new Uint8Array(total), hgt = new Float32Array(total);
   cell.set(S.coords, 0); sp.set(S.species, 0);
-  for (let i=0;i<k;i++){ lab[i] = S.labels[i]; size[i] = sizes.get(S.labels[i]); }
+  hgt.fill(1);
+  if (S.labels && S.labels.length === k && S.hasLabels){
+    const sizes = new Map(); for (let i=0;i<k;i++) sizes.set(S.labels[i], (sizes.get(S.labels[i])||0)+1);
+    for (let i=0;i<k;i++){ lab[i]=S.labels[i]; size[i]=sizes.get(S.labels[i]); }
+    S.sizes = sizes;
+  } else { size.fill(1e9); S.sizes = null; }   // без разметки фильтр по размеру не режет
   let o = k;
-  if (m) { cell.set(S.soil, o*3); for (let i=0;i<m;i++){ kind[o+i]=2; } o += m; }
-  if (stoneCount) { let j=o*3; for (let x=0;x<n;x++) for (let y=0;y<n;y++){ cell[j++]=x; cell[j++]=y; cell[j++]=S.relief[x][y]-1; kind[o++]=1; } }
-  gl.bindBuffer(gl.ARRAY_BUFFER, B.cell); gl.bufferData(gl.ARRAY_BUFFER, cell, gl.DYNAMIC_DRAW);
-  gl.bindBuffer(gl.ARRAY_BUFFER, B.sp);   gl.bufferData(gl.ARRAY_BUFFER, sp, gl.DYNAMIC_DRAW);
-  gl.bindBuffer(gl.ARRAY_BUFFER, B.lab);  gl.bufferData(gl.ARRAY_BUFFER, lab, gl.DYNAMIC_DRAW);
-  gl.bindBuffer(gl.ARRAY_BUFFER, B.size); gl.bufferData(gl.ARRAY_BUFFER, size, gl.DYNAMIC_DRAW);
-  gl.bindBuffer(gl.ARRAY_BUFFER, B.kind); gl.bufferData(gl.ARRAY_BUFFER, kind, gl.DYNAMIC_DRAW);
-  instCount = total; liveCount = k; S.sizes = sizes;
+  if (m){ cell.set(S.soil, o*3); for (let i=0;i<m;i++) kind[o+i]=2; o += m; }
+  if (heightmaps){
+    const st=S.stoneH, so=S.soilH, wa=S.waterH;
+    for (let x=0;x<n;x++) for (let y=0;y<n;y++){
+      const i=x*n+y, sh=st[i], sd=so?so[i]:0, wd=wa?wa[i]:0;
+      if (sh>0){ cell[o*3]=x; cell[o*3+1]=y; cell[o*3+2]=0; kind[o]=1; hgt[o]=sh; o++; }
+      if (sd>0){ cell[o*3]=x; cell[o*3+1]=y; cell[o*3+2]=sh; kind[o]=2; hgt[o]=sd; o++; }
+      if (wd>0){ cell[o*3]=x; cell[o*3+1]=y; cell[o*3+2]=sh+sd; kind[o]=3; hgt[o]=wd; o++; }
+    }
+  } else if (S.relief){
+    for (let x=0;x<n;x++) for (let y=0;y<n;y++){
+      const h=S.relief[x][y]; if (h<=0) continue;
+      cell[o*3]=x; cell[o*3+1]=y; cell[o*3+2]=0; kind[o]=1; hgt[o]=h; o++;
+    }
+  }
+  const up=(b,arr)=>{ gl.bindBuffer(gl.ARRAY_BUFFER,b); gl.bufferData(gl.ARRAY_BUFFER,arr.subarray?arr.subarray(0, arr===cell?o*3:o):arr, gl.DYNAMIC_DRAW); };
+  up(B.cell, cell); up(B.sp, sp); up(B.lab, lab); up(B.size, size); up(B.kind, kind); up(B.height, hgt);
+  instCount = o; liveCount = k;
 }
 
 // ------------------------------------------------------------------ камера
@@ -303,7 +328,14 @@ function draw(){
     gl.uniform1f(U.uColorMode, S.colorMode==='species'?0:1); gl.uniform1f(U.uGhost, S.ghost?1:0);
     gl.uniform1f(U.uShowStone, S.showStone?1:0); gl.uniform1f(U.uShowSoil, S.showSoil?1:0);
     gl.bindVertexArray(vao);
+    gl.uniform1f(U.uWaterPass, 0);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, instCount);
+    if (S.hasWater){    // вода — полупрозрачным проходом поверх
+      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
+      gl.uniform1f(U.uWaterPass, 1);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, instCount);
+      gl.depthMask(true); gl.disable(gl.BLEND);
+    }
   }
   S.frames++;
   const extra = (S.stride>1?`   показана 1/${S.stride} клеток`:'') + (S.componentsOn===false?'   организмы не считаются (большой мир)':'');
@@ -375,12 +407,22 @@ function applyFrame(buf){
   let off=4+hl; const k=hdr.k, m=hdr.m;
   S.coords=new Uint16Array(buf.slice(off, off+k*6)); off+=k*6;
   S.species=new Uint8Array(buf.slice(off, off+k)); off+=k;
-  S.labels=new Uint32Array(buf.slice(off, off+k*4)); off+=k*4;
-  S.soil=new Uint16Array(buf.slice(off, off+m*6));
+  if (hdr.labels){ S.labels=new Uint32Array(buf.slice(off, off+k*4)); off+=k*4; }
+  S.soil=new Uint16Array(buf.slice(off, off+m*6)); off+=m*6;
+  if (hdr.maps){ const N=hdr.n;
+    for (const key of ['stone_h','soil_h','water_h']) if (hdr.maps[key]){
+      hdr[key]=new Uint16Array(buf.slice(off, off+N*N*2)); off+=N*N*2; } }
   S.gen=hdr.gen; S.k=k; S.pops=hdr.pops; S.comps=hdr.components; S.hist=hdr.hist_tail;
   S.paused=hdr.paused; S.rate=hdr.rate; S.measured=hdr.measured_rate;
   S.stride=hdr.stride||1; S.componentsOn=hdr.components_on!==false; S.snapshotMs=hdr.snapshot_ms||0;
-  if (hdr.relief){ S.relief=hdr.relief; }
+  if (hdr.relief){ S.relief=hdr.relief; S.stoneH=null; }
+  if (hdr.heightmaps){
+    if (hdr.stone_h) S.stoneH=hdr.stone_h;
+    if (hdr.soil_h) S.soilH=hdr.soil_h;
+    if (hdr.water_h) S.waterH=hdr.water_h;
+    S.hasWater = !!(S.waterH && S.waterH.some(v=>v>0));
+  }
+  S.hasLabels = !!hdr.labels;
   if (hdr.species_names) {
     const key = JSON.stringify([hdr.species_names, hdr.species_colors]);
     if (key !== S.namesKey){ S.namesKey = key; S.names=hdr.species_names; S.nsp=hdr.species_names.length; MAXSP=Math.max(8,S.nsp);
@@ -540,6 +582,11 @@ const Audio = {
     for (const v of this.voices.values()) v.o.frequency.setTargetAtTime(hz*v.h, t, 0.05); },
   apply(sf){
     this.frame = sf; if (!this.ctx || !this.on || !sf) return;
+    // основной тон приходит из мира (его считает SoundMapper по населению)
+    if (S.autoHz && sf.base_hz && Math.abs(sf.base_hz - this.baseHz) > 0.05){
+      this.setBase(sf.base_hz); $('hzLbl').textContent = sf.base_hz.toFixed(1)+' Гц';
+      $('baseHz').value = Math.round(sf.base_hz);
+    }
     const t = this.ctx.currentTime, tau = 0.08, sr2 = this.ctx.sampleRate/2;
     let entW=0, aSum=0;
     for (let h=0; h<this.nb; h++){
@@ -582,7 +629,8 @@ const Audio = {
 };
 $('btnAudio').onclick = ()=>Audio.toggle();
 $('vol').oninput = e=>{ $('volLbl').textContent=e.target.value; if(Audio.master) Audio.master.gain.setTargetAtTime(+e.target.value, Audio.ctx.currentTime, 0.05); };
-$('baseHz').oninput = e=>{ $('hzLbl').textContent=e.target.value+' Гц'; Audio.setBase(+e.target.value); };
+$('baseHz').oninput = e=>{ S.autoHz=false; $('autoHz').checked=false; $('hzLbl').textContent=e.target.value+' Гц'; Audio.setBase(+e.target.value); };
+$('autoHz').onchange = e=>{ S.autoHz = e.target.checked; };
 $('mixH').oninput = e=>{ if(Audio.busH) Audio.busH.gain.value=+e.target.value; };
 $('mixV').oninput = e=>{ if(Audio.busV) Audio.busV.gain.value=+e.target.value; };
 $('mixN').oninput = e=>{ if(Audio.busN) Audio.busN.gain.value=+e.target.value; };

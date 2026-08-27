@@ -36,6 +36,7 @@ class SoundFrame:
     gen: int
     harmonics: list          # 64 амплитуд 0..1
     noise: list              # 64 шумовых примесей 0..1
+    base_hz: float = 55.0                       # основной тон — из населения
     voices: list = field(default_factory=list)   # [Voice]
     births: list = field(default_factory=list)   # id новых голосов
     deaths: list = field(default_factory=list)   # id погибших голосов
@@ -48,12 +49,17 @@ class SoundFrame:
         for v in d["voices"]:
             v["amp"] = round(v["amp"], 4); v["pan"] = round(v["pan"], 3); v["vib"] = round(v["vib"], 3)
         d["activity"] = round(self.activity, 4)
+        d["base_hz"] = round(self.base_hz, 2)
         return d
 
 
 class SoundMapper:
+    # пентатоника: смена доминирующего вида слышна как смена тональности,
+    # а не как случайный сдвиг
+    PENTA = (0, 3, 5, 7, 10, 12, 15, 17, 19, 22)
+
     def __init__(self, n_bands=64, max_voices=12, min_voice_size=8,
-                 amp_ref=None):
+                 amp_ref=None, base_min=36.0):
         self.n_bands = n_bands
         self.max_voices = max_voices
         self.min_voice_size = min_voice_size
@@ -62,6 +68,9 @@ class SoundMapper:
         self._prev_voice_ids = set()
         self._prev_cells = None
         self._peak = 1.0
+        self.base_min = float(base_min)
+        self._base_hz = float(base_min) * 1.5
+        self._dominant = None
 
     # --- гармоники ----------------------------------------------------------
     def bands(self, snap: Snapshot):
@@ -128,8 +137,64 @@ class SoundMapper:
         self._prev_cells = cur
         return float(act)
 
+    def species_voices(self, snap: Snapshot):
+        """Голоса из ВИДОВ: работают и там, где организмы не размечаются
+        (большие миры). Раньше в таких мирах голосов не было вовсе и звук
+        оставался ровным фоном — на это жаловались."""
+        pops = list(snap.pops)
+        total = sum(pops)
+        if total <= 0:
+            return [], [], []
+        order = [i for i in np.argsort(pops)[::-1] if pops[i] > 0][: self.max_voices]
+        sp = snap.species.astype(np.int64)
+        n = max(snap.n - 1, 1)
+        out, centers = [], {}
+        for rank, i in enumerate(order):
+            sid = int(i) + 1
+            m = sp == sid
+            cnt = int(m.sum())
+            if cnt == 0:
+                continue
+            cx = float(snap.coords[m][:, 0].mean()) if cnt else 0.0
+            cz = float(snap.coords[m][:, 2].mean()) if cnt else 0.0
+            # высота голоса: чем выше вид живёт и чем он малочисленнее, тем выше
+            share = pops[i] / total
+            h = int(np.clip(round(1 + rank + 6.0 * (cz / n)), 1, self.n_bands))
+            prev = self._prev_centers.get(sid)
+            speed = abs(cx - prev[0]) + abs(cz - prev[1]) if prev else 0.0
+            out.append(Voice(vid=sid, harmonic=h, amp=float(np.sqrt(share)),
+                             pan=float(2 * cx / n - 1), vib=float(np.clip(speed, 0, 1)),
+                             age=0, species=sid))
+            centers[sid] = (cx, cz)
+        ids = {v.vid for v in out}
+        births = sorted(ids - self._prev_voice_ids)
+        deaths = sorted(self._prev_voice_ids - ids)
+        self._prev_centers = centers
+        self._prev_voice_ids = ids
+        return out, births, deaths
+
+    def base_from_world(self, snap: Snapshot):
+        """Основной тон вычисляется из населения: тональность задаёт
+        доминирующий вид, октаву — насколько густо заселён мир."""
+        pops = list(snap.pops)
+        total = sum(pops)
+        if total <= 0:
+            return self._base_hz
+        dom = int(np.argmax(pops))
+        degree = self.PENTA[dom % len(self.PENTA)]
+        octave = 0 if total < 2000 else (1 if total < 40000 else 2)
+        target = self.base_min * (2.0 ** octave) * (2.0 ** (degree / 12.0))
+        # плавный переход: скачок тона резал бы слух
+        self._base_hz += 0.15 * (target - self._base_hz)
+        self._dominant = dom + 1
+        return self._base_hz
+
     def map(self, snap: Snapshot) -> SoundFrame:
         amp, noise = self.bands(snap)
-        vs, births, deaths = self.voices(snap)
+        if snap.components:
+            vs, births, deaths = self.voices(snap)
+        else:
+            vs, births, deaths = self.species_voices(snap)
         return SoundFrame(gen=snap.gen, harmonics=amp, noise=noise, voices=vs,
-                          births=births, deaths=deaths, activity=self.activity(snap))
+                          births=births, deaths=deaths, activity=self.activity(snap),
+                          base_hz=self.base_from_world(snap))

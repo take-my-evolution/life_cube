@@ -14,6 +14,7 @@ import importlib
 ENGINES = {
     "ecology": "life_cube.engines.ecology",
     "lichen": "life_cube.engines.lichen",
+    "terra": "life_cube.engines.terra",
 }
 
 _cache = {}

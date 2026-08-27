@@ -12,10 +12,13 @@ import numpy as np
 from .features import SoundFrame, SoundMapper
 
 
-def render(frames, sr=44100, seconds_per_frame=0.1, base_hz=55.0,
+def render(frames, sr=44100, seconds_per_frame=0.1, base_hz=None,
            harmonics_gain=0.6, voices_gain=0.5, noise_gain=0.25, stereo=True):
     if not frames:
         return np.zeros((0, 2 if stereo else 1), np.float32)
+    # база берётся из кадра (её считает SoundMapper по населению), если не задана
+    if base_hz is None:
+        base_hz = float(np.mean([getattr(f, "base_hz", 55.0) for f in frames]))
     nb = len(frames[0].harmonics)
     spf = int(sr * seconds_per_frame)
     total = spf * len(frames)
@@ -73,7 +76,7 @@ def write_wav(path, wave, sr=44100):
     return path
 
 
-def sonify_run(cfg, use_gpu=False, seconds_per_frame=0.1, base_hz=55.0, **kw):
+def sonify_run(cfg, use_gpu=False, seconds_per_frame=0.1, base_hz=None, **kw):
     """Прогнать мир и вернуть (frames, wave): звук всей истории."""
     from ..backend import get_backend
     from ..sim import init_state

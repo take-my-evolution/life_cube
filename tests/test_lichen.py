@@ -17,9 +17,9 @@ def make(n=32, **kw):
     return cfg, state
 
 
-def test_registry_lists_both_engines():
+def test_registry_lists_engines():
     names = [e["name"] for e in list_engines()]
-    assert names == ["ecology", "lichen"]
+    assert names[:2] == ["ecology", "lichen"] and "terra" in names
     assert get_rules("ecology").Config is not get_rules("lichen").Config
 
 

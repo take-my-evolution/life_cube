@@ -35,7 +35,12 @@ class Snapshot:
     species: np.ndarray             # (k,) uint8
     labels: np.ndarray              # (k,) uint32 — устойчивый id организма
     components: list = field(default_factory=list)   # [Component]
-    soil_coords: np.ndarray = None  # (m, 3) uint16 — растворённый камень
+    soil_coords: np.ndarray = None  # (m, 3) uint16 — растворённый камень (разреженно)
+    # для движков, где подложка — карты высот: рельеф передаётся ими, а не
+    # поклеточно (на большом мире это разница в десятки раз)
+    stone_h: np.ndarray = None      # (n, n) uint16
+    soil_h: np.ndarray = None       # (n, n) uint16
+    water_h: np.ndarray = None      # (n, n) uint16
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +174,8 @@ def make_snapshot(state, gen, cfg, tracker=None, with_components=True,
     pops = [int(c) for c in counts[1:n_species + 1]]
     soil_coords, _ = pack_cells(state["soil"])
 
+    if not with_components:
+        pass
     if with_components:
         lab, _ = label_components(species)
         ids_dense = tracker.assign(lab, gen) if tracker else lab.astype(np.uint32)

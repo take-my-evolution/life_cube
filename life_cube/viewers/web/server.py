@@ -30,7 +30,15 @@ from ...sound import SoundMapper
 STATIC = pathlib.Path(__file__).parent / "static"
 
 
-def encode_snapshot(snap: Snapshot, first=False, sound=None) -> bytes:
+def _digest(obj):
+    import hashlib
+    return hashlib.blake2b(repr(obj).encode(), digest_size=8).hexdigest()
+
+
+def encode_snapshot(snap: Snapshot, first=False, sound=None, sent=None) -> bytes:
+    """sent — словарь состояния клиента: что ему уже отправлено (рельеф, имена).
+    Всё, что не изменилось, в кадр не попадает: на большом мире рельеф и имена
+    64 видов в JSON стоили больше самой геометрии."""
     header = {
         "sound": sound.to_dict() if sound is not None else None,
         "gen": snap.gen, "n": snap.n, "k": int(len(snap.coords)),
@@ -44,26 +52,53 @@ def encode_snapshot(snap: Snapshot, first=False, sound=None) -> bytes:
         "snapshot_ms": round(getattr(snap, "snapshot_seconds", 0.0) * 1000),
         "components": [[c.cid, c.species, c.size, *c.center, c.zmin, c.zmax, c.born]
                        for c in snap.components],
-        "hist_tail": [list(map(int, h)) for h in getattr(snap, "hist", [])[-400:]],
+        "hist_tail": [list(map(int, h)) for h in getattr(snap, "hist", [])],
+        # метки организмов не шлём, когда их не считают: это 4 байта на клетку
+        "labels": bool(snap.components) and len(snap.labels) == len(snap.coords),
     }
-    dyn = getattr(snap, "dynamic_species", False)
-    if first or dyn:
-        # у движков с динамическими видами имена/цвета меняются — шлём всегда
-        header["species_names"] = list(getattr(snap, "species_names", []))[:len(snap.pops)]
-        header["species_colors"] = list(getattr(snap, "species_colors", []))[:len(snap.pops)]
+    sent = sent if sent is not None else {}
+    names = list(getattr(snap, "species_names", []))[:len(snap.pops)]
+    colors = list(getattr(snap, "species_colors", []))[:len(snap.pops)]
+    nd = _digest((names, colors))
+    if first or nd != sent.get("names"):
+        header["species_names"] = names
+        header["species_colors"] = colors
+        sent["names"] = nd
     if first:
         header["config"] = getattr(snap, "config_json", None)
         header["engines"] = list_engines()
-    if first or getattr(snap, "relief_dirty", False):
+    # карты высот (камень/почва/вода) — бинарно и только когда изменились
+    maps = {}
+    if snap.stone_h is not None:
+        header["heightmaps"] = True
+        for key in ("stone_h", "soil_h", "water_h"):
+            a = getattr(snap, key, None)
+            if a is None:
+                continue
+            d = _digest(a.tobytes())
+            if first or d != sent.get(key):
+                maps[key] = True
+                sent[key] = d
+        header["maps"] = maps
+    else:
         relief = getattr(snap, "relief", None)
-        header["relief"] = relief.astype(int).tolist() if relief is not None else None
+        if relief is not None:
+            rd = _digest(relief.tobytes())
+            if first or rd != sent.get("relief"):
+                header["relief"] = relief.astype(int).tolist()
+                sent["relief"] = rd
     hb = json.dumps(header, ensure_ascii=False).encode()
     soil = snap.soil_coords if snap.soil_coords is not None else np.zeros((0, 3), np.uint16)
     parts = [struct.pack("<I", len(hb)), hb,
              np.ascontiguousarray(snap.coords, dtype=np.uint16).tobytes(),
-             np.ascontiguousarray(snap.species, dtype=np.uint8).tobytes(),
-             np.ascontiguousarray(snap.labels, dtype=np.uint32).tobytes(),
-             np.ascontiguousarray(soil, dtype=np.uint16).tobytes()]
+             np.ascontiguousarray(snap.species, dtype=np.uint8).tobytes()]
+    if header["labels"]:
+        parts.append(np.ascontiguousarray(snap.labels, dtype=np.uint32).tobytes())
+    parts.append(np.ascontiguousarray(soil, dtype=np.uint16).tobytes())
+    for key in ("stone_h", "soil_h", "water_h"):
+        a = getattr(snap, key, None)
+        if a is not None and header.get("maps", {}).get(key):
+            parts.append(np.ascontiguousarray(a, dtype=np.uint16).tobytes())
     return b"".join(parts)
 
 
@@ -75,8 +110,15 @@ def decode_snapshot(buf: bytes):
     k, m = header["k"], header["m"]
     coords = np.frombuffer(buf, np.uint16, k * 3, off).reshape(k, 3); off += k * 6
     species = np.frombuffer(buf, np.uint8, k, off); off += k
-    labels = np.frombuffer(buf, np.uint32, k, off); off += k * 4
-    soil = np.frombuffer(buf, np.uint16, m * 3, off).reshape(m, 3)
+    if header.get("labels"):
+        labels = np.frombuffer(buf, np.uint32, k, off); off += k * 4
+    else:
+        labels = np.zeros(k, np.uint32)
+    soil = np.frombuffer(buf, np.uint16, m * 3, off).reshape(m, 3); off += m * 6
+    n = header["n"]
+    for key in ("stone_h", "soil_h", "water_h"):
+        if header.get("maps", {}).get(key):
+            header[key] = np.frombuffer(buf, np.uint16, n * n, off).reshape(n, n); off += n * n * 2
     return header, coords, species, labels, soil
 
 
@@ -94,6 +136,7 @@ class WebViewer:
         self._new = asyncio.Event()
         self.mapper = SoundMapper()
         self.latest_sound = None
+        self._sent = {}            # что клиентам уже отправлено (рельеф, имена)
         engine.on_snapshot(self._on_snapshot)
 
     # вызывается из потока симуляции
@@ -138,7 +181,10 @@ class WebViewer:
             snap = self.latest
             if snap is None or not self.clients:
                 continue
-            data = encode_snapshot(snap, sound=self.latest_sound)
+            # Кодирование (включая json.dumps заголовка) — В ПОТОКЕ: на
+            # большом мире это десятки мс, и в цикле событий оно душило сервер
+            data = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: encode_snapshot(snap, sound=self.latest_sound, sent=self._sent))
             dead = []
             for ws in list(self.clients):
                 try:
@@ -155,6 +201,7 @@ class WebViewer:
         snap = self.latest or self.engine.publish(force=True)
         snap.config_json = self.engine.rules.to_json(self.engine.cfg, self.engine.state)
         await ws.send_bytes(encode_snapshot(snap, first=True, sound=self.latest_sound))
+        self._sent = {}            # новый зритель — следующий общий кадр полный
         self.clients.add(ws)
         try:
             async for msg in ws:

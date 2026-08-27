@@ -1,3 +1,37 @@
 life-cube web viewer: http://0.0.0.0:8765/  (куб 128³, GPU)
 life-cube web viewer: http://0.0.0.0:8765/  (куб 128³, GPU)
 life-cube web viewer: http://0.0.0.0:8765/  (куб 128³, GPU)
+life-cube web viewer: http://0.0.0.0:8765/  (движок ecology, куб 128³, GPU)
+Error handling request from 192.168.1.132
+Traceback (most recent call last):
+  File "/home/mushishi/git/life_cube/life_cube/viewers/web/server.py", line 172, in ws_handler
+    await asyncio.get_running_loop().run_in_executor(
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mushishi/git/life_cube/life_cube/viewers/web/server.py", line 200, in handle
+    e.set_genomes(cmd["value"], ids=cmd.get("ids"))
+  File "/home/mushishi/git/life_cube/life_cube/engine.py", line 68, in set_genomes
+    self.rules.apply_genomes(self.cfg, self.state, genomes, self.xp, ids=ids)
+TypeError: EcologyRules.apply_genomes() got an unexpected keyword argument 'ids'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/mushishi/git/life_cube/.venv/lib/python3.12/site-packages/aiohttp/web_protocol.py", line 575, in _handle_request
+    resp = await request_handler(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mushishi/git/life_cube/.venv/lib/python3.12/site-packages/aiohttp/web_app.py", line 559, in _handle
+    return await handler(request)
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mushishi/git/life_cube/life_cube/viewers/web/server.py", line 175, in ws_handler
+    await ws.send_str(json.dumps({"error": str(e)}))
+  File "/home/mushishi/git/life_cube/.venv/lib/python3.12/site-packages/aiohttp/web_ws.py", line 478, in send_str
+    await self._writer.send_frame(
+  File "/home/mushishi/git/life_cube/.venv/lib/python3.12/site-packages/aiohttp/_websocket/writer.py", line 89, in send_frame
+    self._send_compressed_frame_sync(message, opcode, compress)
+  File "/home/mushishi/git/life_cube/.venv/lib/python3.12/site-packages/aiohttp/_websocket/writer.py", line 205, in _send_compressed_frame_sync
+    self._write_websocket_frame(
+  File "/home/mushishi/git/life_cube/.venv/lib/python3.12/site-packages/aiohttp/_websocket/writer.py", line 150, in _write_websocket_frame
+    raise ClientConnectionResetError("Cannot write to closing transport")
+aiohttp.client_exceptions.ClientConnectionResetError: Cannot write to closing transport
