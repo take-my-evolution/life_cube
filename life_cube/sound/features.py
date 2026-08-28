@@ -41,6 +41,11 @@ class SoundFrame:
     births: list = field(default_factory=list)   # id новых голосов
     deaths: list = field(default_factory=list)   # id погибших голосов
     activity: float = 0.0    # доля изменившихся клеток 0..1 — темп «дыхания»
+    # доминирующий вид в полосе (1..N, 0 — полоса пуста). Дёшево считается
+    # заодно с bands() (argmax по уже собранной матрице counts), используется
+    # клиентом для режима "Кристалл": каждая полоса красится по своему виду
+    # вместо плоского целочисленного обертона.
+    band_species: list = field(default_factory=list)
 
     def to_dict(self):
         d = asdict(self)
@@ -90,6 +95,11 @@ class SoundMapper:
             ent = -(p * np.log(np.where(p > 0, p, 1))).sum(axis=1)
         ent = ent / np.log(max(n_sp, 2))
 
+        # доминирующий вид полосы: argmax по уже собранной матрице counts,
+        # почти бесплатно (n_bands x n_species уже посчитаны выше). 0 — полоса
+        # пуста (tot == 0), иначе 1..n_sp.
+        dom = np.where(tot.squeeze(-1) > 0, counts.argmax(axis=1) + 1, 0)
+
         # нормировка: авто-пик с медленным спадом, чтобы громкость не прыгала
         if self.amp_ref:
             ref = self.amp_ref
@@ -97,7 +107,7 @@ class SoundMapper:
             self._peak = max(pop.max(), self._peak * 0.995, 1.0)
             ref = self._peak
         amp = np.sqrt(np.clip(pop / ref, 0, 1))      # sqrt — ближе к восприятию
-        return amp.tolist(), np.clip(ent, 0, 1).tolist()
+        return amp.tolist(), np.clip(ent, 0, 1).tolist(), dom.astype(int).tolist()
 
     # --- голоса -------------------------------------------------------------
     def voices(self, snap: Snapshot):
@@ -190,11 +200,11 @@ class SoundMapper:
         return self._base_hz
 
     def map(self, snap: Snapshot) -> SoundFrame:
-        amp, noise = self.bands(snap)
+        amp, noise, band_species = self.bands(snap)
         if snap.components:
             vs, births, deaths = self.voices(snap)
         else:
             vs, births, deaths = self.species_voices(snap)
         return SoundFrame(gen=snap.gen, harmonics=amp, noise=noise, voices=vs,
                           births=births, deaths=deaths, activity=self.activity(snap),
-                          base_hz=self.base_from_world(snap))
+                          base_hz=self.base_from_world(snap), band_species=band_species)

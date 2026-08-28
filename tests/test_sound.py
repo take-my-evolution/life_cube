@@ -66,6 +66,25 @@ def test_to_dict_is_json_friendly():
     assert set(d) >= {"gen", "harmonics", "noise", "voices", "births", "deaths", "activity"}
 
 
+def test_bands_report_dominant_species_for_colorful_mode():
+    """Режим "Кристалл" красит каждую полосу по доминирующему в ней виду —
+    для этого bands()/SoundFrame обязаны отдавать band_species: 1..N — id
+    доминирующего вида полосы, 0 — полоса пуста."""
+    m = SoundMapper(n_bands=64, amp_ref=10)
+    # полоса 0: 7 клеток вида 1 и 3 клетки вида 2 -> доминирует вид 1
+    # полоса 32: 2 клетки вида 2 и 2 клетки вида 3 -> ничья, argmax берёт первый по индексу (вид 2)
+    # полоса 40: пусто
+    cells = ([(i, 0, 0, 1, 1) for i in range(7)] + [(i, 1, 0, 2, 1) for i in range(3)]
+             + [(i, 0, 32, 2, 2) for i in range(2)] + [(i, 1, 32, 3, 2) for i in range(2)])
+    sf = m.map(snap_from(cells))
+    assert len(sf.band_species) == 64
+    assert sf.band_species[0] == 1
+    assert sf.band_species[32] == 2
+    assert sf.band_species[40] == 0
+    d = sf.to_dict()
+    assert d["band_species"] == sf.band_species
+
+
 def _spectrum(wave, sr):
     x = wave.mean(axis=1) if wave.ndim == 2 else wave
     spec = np.abs(np.fft.rfft(x * np.hanning(len(x))))
