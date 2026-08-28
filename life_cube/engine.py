@@ -236,8 +236,9 @@ class Engine:
         snap.measured_rate = self.measured_rate
         snap.paused = self.paused
         snap.components_on = want
-        self.last_snapshot = snap
         self.snapshot_seconds = time.perf_counter() - t_start
+        snap.snapshot_seconds = self.snapshot_seconds   # для диагностики в клиенте
+        self.last_snapshot = snap
         for fn in self.listeners:
             fn(snap)
         return snap

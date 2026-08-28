@@ -139,6 +139,7 @@ class WebViewer:
         self.mapper = SoundMapper()
         self.latest_sound = None
         self._sent = {}            # что клиентам уже отправлено (рельеф, имена)
+        self._heavy_task = None    # фоновая разметка организмов (см. broadcaster)
         engine.on_snapshot(self._on_snapshot)
 
     # вызывается из потока симуляции
@@ -154,35 +155,52 @@ class WebViewer:
     async def broadcaster(self):
         """Кадры уходят не чаще fps и только зрителям. Если движок не
         публикует сам (snapshot_every=0), снимок делаем здесь, в пуле потоков,
-        чтобы ни симуляция, ни event loop не ждали разметки организмов."""
+        чтобы ни симуляция, ни event loop не ждали разметки организмов.
+
+        Разметка организмов — самая дорогая часть кадра: scipy.label по всему
+        кубу, отдельно на каждый вид. На населённом мире (десятки тысяч живых
+        клеток) это ~80мс против ~7мс на голую геометрию — на порядок дороже.
+        Раньше её считали ПРЯМО в этом цикле раз в components_hz — и каждый
+        такой кадр рендер стопорился на десятки-сотни миллисекунд (рывок), а
+        звук (голоса берутся из организмов, snapshot.describe_components)
+        разом перескакивал на новый набор нот ровно с той же периодичностью —
+        отсюда «нота на разной высоте через равный промежуток» (наступали).
+        Теперь разметка считается в фоновой задаче, не блокируя выдачу
+        кадров: геометрия идёт каждый тик, организмы (а с ними и голоса)
+        подтягиваются, когда фон досчитает — обычно за один-два кадра, без
+        видимого стопора. Ценой того, что кадр с организмами может на пару
+        поколений отстать от геометрии — на населении, которое меняется на
+        доли процента за 80мс, это незаметно."""
         pull = self.engine.snapshot_every <= 0
         last_gen = -1
+        last_sent = None
         every = max(1, int(round(self.fps / max(self.components_hz, 1e-6))))
         tick = 0
         while True:
             if pull:
-                # если прошлый снимок был долгим, снимаем реже: иначе очередь
-                # снимков забивает и симуляцию, и сервер (так вешался большой куб)
-                slow = self.engine.snapshot_seconds
-                await asyncio.sleep(max(1.0 / self.fps, min(slow * 1.5, 5.0)))
-                if not self.clients or self.engine.gen == last_gen or self.engine.busy:
-                    continue
-                last_gen = self.engine.gen
-                tick += 1
-                # разметка организмов дороже самой геометрии — делаем её реже
-                comps = (tick % every == 0)
-                self.engine.busy = True
-                try:
-                    await asyncio.get_running_loop().run_in_executor(
-                        None, lambda: self.engine.publish(force=True, components=comps))
-                finally:
-                    self.engine.busy = False
+                await asyncio.sleep(1.0 / self.fps)
+                if self.clients and not self.engine.busy and self.engine.gen != last_gen:
+                    last_gen = self.engine.gen
+                    tick += 1
+                    self.engine.busy = True
+                    try:
+                        await asyncio.get_running_loop().run_in_executor(
+                            None, lambda: self.engine.publish(force=True, components=False))
+                    finally:
+                        self.engine.busy = False
+                    # организмы — своим фоновым темпом, не в этом такте
+                    if (tick % every == 0
+                            and (self._heavy_task is None or self._heavy_task.done())):
+                        self._heavy_task = asyncio.ensure_future(self._recompute_components())
             else:
                 await self._new.wait()
                 self._new.clear()
             snap = self.latest
-            if snap is None or not self.clients:
+            # ничего нового не появилось (симуляция медленнее fps, а фон ещё
+            # не досчитал) — незачем кодировать и слать тот же кадр повторно
+            if snap is None or not self.clients or snap is last_sent:
                 continue
+            last_sent = snap
             # Кодирование (включая json.dumps заголовка) — В ПОТОКЕ: на
             # большом мире это десятки мс, и в цикле событий оно душило сервер
             data = await asyncio.get_running_loop().run_in_executor(
@@ -195,6 +213,16 @@ class WebViewer:
                     dead.append(ws)
             for ws in dead:
                 self.clients.discard(ws)
+
+    async def _recompute_components(self):
+        """Фоновая разметка организмов — см. broadcaster(). Ошибку глотаем:
+        одна неудачная разметка не должна ронять поток кадров, следующая
+        попытка придёт через components_hz."""
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None, lambda: self.engine.publish(force=True, components=True))
+        except Exception:
+            pass
 
     async def ws_handler(self, request):
         from aiohttp import web, WSMsgType
