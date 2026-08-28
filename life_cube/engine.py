@@ -14,7 +14,7 @@ import numpy as np
 from .backend import get_backend, to_cpu
 from .config import Config
 from .engines import get_rules
-from .snapshot import Tracker, make_snapshot
+from .snapshot import Tracker, make_snapshot, describe_components
 
 
 class Engine:
@@ -201,9 +201,56 @@ class Engine:
             want = False                    # слишком большой мир — без разметки
         snap = make_snapshot(cpu, gen, self.cfg, self.tracker,
                              with_components=want, n_species=n_species)
-        if not want and self.last_snapshot is not None:
-            # переиспользуем прошлую разметку организмов: она обновляется реже
-            snap.components = self.last_snapshot.components
+        if not want:
+            # Полную разметку (scipy.label) на этом такте не считаем — дорого
+            # (см. WebViewer.broadcaster). Но список организмов не должен
+            # висеть неизменным до следующего тяжёлого пересчёта: тогда
+            # размер/положение/громкость голоса (SoundMapper берёт их из
+            # snap.components) стоят на месте кадров десять-двадцать подряд
+            # и потом разом скачут — на слух это звучит синхронным щелчком
+            # на подозрительно ровном интервале components_hz, никак не
+            # связанным с тем, что реально непрерывно происходит с
+            # клетками (жалоба пользователя после v0.7.3).
+            #
+            # Дешёвый компромисс: берём СТАРУЮ (с последнего тяжёлого
+            # пересчёта) устойчивую id-карту (tracker.prev, тот же плотный
+            # массив, что использует сам Tracker для сопоставления кадров)
+            # и накладываем её на ТЕКУЩИЕ живые клетки — обычное
+            # индексирование массива, на порядки дешевле scipy.label.
+            # Организмы, которые с последнего пересчёта выросли за старые
+            # границы или родились заново, в эту карту не попадают (id=0)
+            # и появятся только на следующем тяжёлом пересчёте — это
+            # редкое дискретное событие (действительно новый организм), а
+            # не постоянная пульсация. Зато размер/центр уже отслеженных
+            # организмов теперь меняются каждый кадр, а не раз в
+            # components_hz.
+            ids_map = self.tracker.prev if self.tracker is not None else None
+            done = False
+            if (ids_map is not None and len(snap.coords)
+                    and len(snap.coords) <= self.max_cells):
+                c = snap.coords.astype(np.intp)
+                ids = ids_map[c[:, 0], c[:, 1], c[:, 2]]
+                snap.labels = ids.astype(np.uint32)
+                # id=0 — клетка сейчас жива, но там, где на прошлой тяжёлой
+                # разметке было пусто (новый рост/новый организм): это НЕ
+                # организм "номер 0", а "пока неизвестно чей" — учитывать
+                # его как один гигантский компонент нельзя (раньше был
+                # именно такой баг здесь: несвязанные новые клетки со всего
+                # мира схлопывались в один "organism 0" размером с тысячи
+                # клеток). Такие клетки просто не попадают в список
+                # организмов до следующего тяжёлого пересчёта.
+                known = ids > 0
+                if known.any():
+                    snap.components = describe_components(
+                        snap.coords[known], snap.species[known], ids[known],
+                        self.tracker.born, max_components=200)
+                    done = True
+            if not done and self.last_snapshot is not None:
+                # id-карты ещё нет (разметки не было ни разу), мир слишком
+                # населён для дешёвого пересчёта, или все живые клетки —
+                # неопознанный новый рост: как раньше, переиспользуем
+                # прошлую разметку целиком
+                snap.components = self.last_snapshot.components
         # движки с картами высот отдают подложку картами, а не поклеточно
         if getattr(self.rules, "heightmaps", False):
             with self._lock:

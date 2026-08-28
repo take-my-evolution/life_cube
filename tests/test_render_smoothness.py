@@ -19,6 +19,7 @@ import pytest
 
 from life_cube import Config
 from life_cube.engine import Engine
+from life_cube.snapshot import describe_components
 from life_cube.viewers.web.server import WebViewer, encode_snapshot
 
 
@@ -135,3 +136,66 @@ def test_encode_snapshot_reports_snapshot_ms():
     hlen = int.from_bytes(data[:4], "little")
     header = json.loads(data[4:4 + hlen])
     assert header["snapshot_ms"] == 83
+
+
+def test_organism_size_updates_between_heavy_recomputes():
+    """Жалоба после v0.7.3 (щелчок смягчили, но не убрали): организмы (а с
+    ними — SoundMapper и высота/громкость голоса) обновлялись ТОЛЬКО на
+    тяжёлом пересчёте (components_hz, и того реже на населённом мире — сама
+    разметка стоит дороже интервала) — между пересчётами snap.components
+    был буквально тем же списком объектов, потом разом скачком менялся.
+    Engine.publish() теперь на КАЖДОМ быстром такте (components=False)
+    дёшево накладывает старую (с последнего тяжёлого пересчёта) id-карту на
+    текущие живые клетки — без scipy.label — так что усыхание/гибель уже
+    отслеженного организма видно немедленно, а не раз в components_hz."""
+    e = _dense_engine()
+    snap1 = e.publish(force=True, components=True)
+    assert snap1.components
+    biggest = max(snap1.components, key=lambda c: c.size)
+    cid, size1 = biggest.cid, biggest.size
+    assert size1 >= 4, "нужен организм покрупнее, иначе некуда усыхать в этом тесте"
+
+    # "убиваем" половину клеток самого крупного организма — НЕ пересчитывая
+    # разметку (ни scipy.label, ни tracker.assign() тут не вызываются)
+    ids_map = e.tracker.prev
+    cells = np.argwhere(ids_map == cid)
+    to_kill = cells[: len(cells) // 2]
+    sp = e.state["species"]
+    sp[to_kill[:, 0], to_kill[:, 1], to_kill[:, 2]] = 0
+    e.state["species"] = sp
+
+    snap2 = e.publish(force=True, components=False)     # быстрый такт
+    match = [c for c in snap2.components if c.cid == cid]
+    assert match, "организм пропал с быстрого такта вместо того, чтобы усохнуть"
+    assert match[0].size == size1 - len(to_kill)
+
+    # клетки, которые сейчас живы, но не входили ни в один организм на
+    # последней тяжёлой разметке (id=0 — "пока неизвестно чей"), не должны
+    # схлопываться в фантомный "организм номер 0"
+    assert all(c.cid != 0 for c in snap2.components)
+
+
+def test_describe_components_handles_many_fragments_quickly():
+    """describe_components() раньше строила Component-объект на КАЖДЫЙ
+    организм чистым питон-циклом — на сильно фрагментированном мире
+    (десятки тысяч organisms, характерно для теста дешёвого пересчёта на
+    каждом такте) это стоило сотни миллисекунд, даже когда наружу уходила
+    только верхушка max_components. Теперь групповые агрегаты считаются
+    векторно (np.add.reduceat), а Python-объекты строятся только для
+    top-K — иначе дешёвый пересчёт организмов на быстром такте
+    (см. test_organism_size_updates_between_heavy_recomputes) сам стал бы
+    новым источником стопора кадров."""
+    rng = np.random.default_rng(0)
+    n_ids, k = 30_000, 60_000
+    ids = rng.integers(1, n_ids, size=k).astype(np.uint32)
+    coords = rng.integers(0, 128, size=(k, 3)).astype(np.uint16)
+    species = rng.integers(1, 6, size=k).astype(np.uint8)
+
+    t0 = time.perf_counter()
+    comps = describe_components(coords, species, ids, {}, max_components=200)
+    dt = time.perf_counter() - t0
+
+    assert len(comps) == 200
+    assert dt < 0.1, f"describe_components слишком медленная: {dt*1000:.0f}мс на {n_ids} организмов"
+    sizes = [c.size for c in comps]
+    assert sizes == sorted(sizes, reverse=True)

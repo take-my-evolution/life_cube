@@ -150,17 +150,37 @@ def describe_components(coords, species, ids, born, max_components=None):
     order = np.argsort(ids, kind="stable")
     ids_s, coords_s, sp_s = ids[order], coords[order].astype(np.int64), species[order]
     uniq, start, counts = np.unique(ids_s, return_index=True, return_counts=True)
+    # Групповые агрегаты (центр, zmin/zmax) — векторно, разом на ВСЕХ
+    # организмах: np.add.reduceat/np.minimum.reduceat — это C-цикл numpy,
+    # а не питон, и он не замечает, сколько там организмов, хоть десятки
+    # тысяч. Python-объекты Component строим только для того, что реально
+    # возвращаем (после сортировки по размеру и обрезки max_components) —
+    # раньше строили на КАЖДЫЙ организм, и на сильно фрагментированном мире
+    # (тысячи отдельных organisms) это был питон-цикл на сотни миллисекунд,
+    # даже когда наружу уходила только верхушка топ-200. Это било не только
+    # по тяжёлой разметке (и так в фоне), но стало бы стоить дорого и на
+    # быстром такте — там, где по этим же id теперь дёшево досчитывается
+    # текущий размер/центр организмов между тяжёлыми пересчётами (см.
+    # Engine.publish), а не только на самой разметке.
+    sums = np.add.reduceat(coords_s, start, axis=0)
+    centers = sums / counts[:, None]
+    zmin = np.minimum.reduceat(coords_s[:, 2], start)
+    zmax = np.maximum.reduceat(coords_s[:, 2], start)
+    sp_first = sp_s[start]
+
+    order2 = np.argsort(-counts, kind="stable")
+    if max_components:
+        order2 = order2[:max_components]
+
     comps = []
-    for u, st, c in zip(uniq, start, counts):
-        block = coords_s[st:st + c]
-        cen = block.mean(axis=0)
+    for i in order2:
+        u = int(uniq[i])
+        cen = centers[i]
         comps.append(Component(
-            cid=int(u), species=int(sp_s[st]), size=int(c),
+            cid=u, species=int(sp_first[i]), size=int(counts[i]),
             center=(round(float(cen[0]), 1), round(float(cen[1]), 1), round(float(cen[2]), 1)),
-            zmin=int(block[:, 2].min()), zmax=int(block[:, 2].max()),
-            born=int(born.get(int(u), 0))))
-    comps.sort(key=lambda k: -k.size)
-    return comps[:max_components] if max_components else comps
+            zmin=int(zmin[i]), zmax=int(zmax[i]), born=int(born.get(u, 0))))
+    return comps
 
 
 def make_snapshot(state, gen, cfg, tracker=None, with_components=True,
