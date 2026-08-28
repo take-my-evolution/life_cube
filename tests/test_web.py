@@ -502,3 +502,92 @@ def test_voice_pitch_updates_are_staggered_not_synchronized(page, server):
 
     page.click("#btnAudio")
     assert not page.evaluate("viewer.Audio.on")
+
+
+def test_percussion_fires_untimed_bursts_for_events(page, server):
+    """Перкуссия (#percOn, выкл по умолчанию): sf.percussion — {kind: {n, pan}}
+    — должна бить сразу, БЕЗ квантования на какую-либо сетку/BPM (явное
+    требование: "ритм делать не нужно", "максимально хаотичный ритм").
+    Проверяем: (1) выключенная перкуссия молчит; (2) включённая бьёт — по
+    одному Perc.hit на позицию из pan (не больше Perc.cap); (3) отключение
+    конкретного типа события заглушает именно его, не трогая остальные;
+    (4) старт каждого удара не привязан к общему такту — случайный джиттер
+    в пределах [0, spread), а не 0 и не фиксированный шаг."""
+    if not page.evaluate("viewer.Audio.on"):
+        page.click("#btnAudio")
+    page.wait_for_timeout(200)
+    assert page.evaluate("viewer.Audio.on") is True
+    assert page.evaluate("viewer.Perc.on") is False   # по умолчанию выключена
+
+    def sf_with_perc(percussion, births=None, deaths=None):
+        return {"gen": 1, "harmonics": [0] * 64, "noise": [0] * 64, "base_hz": 55,
+                "voices": [], "band_species": [0] * 64,
+                "percussion": percussion, "births": births or [], "deaths": deaths or []}
+
+    def spy():
+        # каждый вызов wrap'ает ИСХОДНЫЙ (несвязанный) hit, а не уже
+        # подмененный предыдущим spy() — иначе повторные spy() в этом же
+        # тесте наслаивали бы прокси друг на друга и удваивали счётчик
+        page.evaluate("""() => {
+            if (!viewer.Perc.__origHit) viewer.Perc.__origHit = viewer.Perc.hit;
+            window.__hits = [];
+            viewer.Perc.hit = new Proxy(viewer.Perc.__origHit, {
+                apply(target, thisArg, args){
+                    window.__hits.push({kind: args[0], t: args[1], pan: args[2], vel: args[3]});
+                    return Reflect.apply(target, thisArg, args);
+                }
+            });
+        }""")
+
+    # (1) перкуссия выключена мастер-чекбоксом -> событие не должно звучать
+    spy()
+    page.evaluate("(sf) => viewer.Perc.trigger(sf)",
+                   sf_with_perc({"kill": {"n": 3, "pan": [0.1, 0.2, 0.3]}}))
+    assert page.evaluate("window.__hits.length") == 0
+
+    page.check("#percOn")
+    assert page.evaluate("viewer.Perc.on") is True
+
+    # (2) включена -> бьёт по каждой позиции из pan (n клеток затронуто,
+    # позиций пришло 3 -> 3 удара типа kill)
+    spy()
+    page.evaluate("(sf) => viewer.Perc.trigger(sf)",
+                   sf_with_perc({"kill": {"n": 3, "pan": [0.1, 0.2, 0.3]}}))
+    hits = page.evaluate("window.__hits")
+    assert len(hits) == 3
+    assert all(h["kind"] == "kill" for h in hits)
+    assert sorted(h["pan"] for h in hits) == pytest.approx([0.1, 0.2, 0.3])
+
+    # cap ограничивает число ударов даже когда позиций пришло больше
+    page.evaluate("() => { viewer.Perc.cap = 2; }")
+    spy()
+    page.evaluate("(sf) => viewer.Perc.trigger(sf)",
+                   sf_with_perc({"kill": {"n": 8, "pan": [0, 0.1, 0.2, 0.3, 0.4]}}))
+    assert page.evaluate("window.__hits.length") == 2
+
+    # (3) отключить конкретный тип события — заглушает именно его, остальные звучат
+    page.evaluate("() => { viewer.Perc.kinds.kill.on = false; }")
+    spy()
+    page.evaluate("(sf) => viewer.Perc.trigger(sf)",
+                   sf_with_perc({"kill": {"n": 1, "pan": [0]}, "shock": {"n": 1, "pan": [0.5]}}))
+    kinds_fired = {h["kind"] for h in page.evaluate("window.__hits")}
+    assert "shock" in kinds_fired    # shock всё ещё звучит
+    page.evaluate("() => { viewer.Perc.kinds.kill.on = true; }")   # вернуть, не портить следующий тест
+
+    # (4) хаотичный старт: не квантован, лежит в [0, spread)
+    page.evaluate("() => { viewer.Perc.spread = 0.3; viewer.Perc.cap = 6; }")
+    spy()
+    page.evaluate("(sf) => viewer.Perc.trigger(sf)",
+                   sf_with_perc({"shock": {"n": 6, "pan": [0, 0.1, 0.2, 0.3, 0.4, 0.5]}}))
+    hits = page.evaluate("window.__hits")
+    t0 = page.evaluate("viewer.Audio.ctx.currentTime")
+    offsets = sorted(h["t"] - t0 for h in hits)
+    assert all(0 <= o < 0.3 + 1e-6 for o in offsets)
+    # не все старты совпадают (иначе это снова синхронный "щелчок", а не хаос)
+    assert len(set(round(o, 4) for o in offsets)) > 1
+
+    page.evaluate("() => { if (viewer.Perc.__origHit) viewer.Perc.hit = viewer.Perc.__origHit; }")
+    page.uncheck("#percOn")
+    assert page.evaluate("viewer.Perc.on") is False
+    page.click("#btnAudio")
+    assert not page.evaluate("viewer.Audio.on")

@@ -125,6 +125,14 @@
   <div class="row muted" id="colorfulHint">полосы звучат аккордом по видам, голоса — хором, добавлен реверб <input id="mixR" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.3"></div>
   <canvas id="waterfall" title="спектр-водопад: 64 полосы куба снизу вверх, время слева направо"></canvas>
 
+  <h3>Перкуссия</h3>
+  <div class="row muted">события мира (охота, гибель, рождение…) бьют сразу, как случились — без ритма и сетки, специально хаотично</div>
+  <div class="row"><label class="sp"><input type="checkbox" id="percOn"> включить</label>
+    <span class="muted">громкость</span> <input id="percVol" type="range" style="width:60px" min="0" max="1.5" step="0.05" value="0.6"></div>
+  <div class="row muted">разброс старта, с <input id="percSpread" type="range" style="width:60px" min="0" max="0.4" step="0.01" value="0.12">
+    ударов за событие <input id="percCap" type="range" style="width:60px" min="1" max="16" step="1" value="6"></div>
+  <div id="percKinds"></div>
+
   <h3>Геном</h3>
   <div class="row"><button id="btnLab">Лаборатория генома…</button><span class="muted">клавиша G</span></div>
   <div class="row muted" id="geneHint">Геном применяется на лету, мир не пересоздаётся.</div>
@@ -522,7 +530,7 @@ function applyFrame(buf){
   $('btnPause').textContent = S.paused ? 'Продолжить' : 'Пауза'; $('btnPause').classList.toggle('on', S.paused);
   rebuildInstances(); renderTable(); drawPops(); dirty=true;
   labTick();
-  S.sound = hdr.sound; Audio.apply(hdr.sound); WF.push(hdr.sound);
+  S.sound = hdr.sound; Audio.apply(hdr.sound); WF.push(hdr.sound); Perc.trigger(hdr.sound);
   S.connected=true;
 }
 function connect(){
@@ -890,6 +898,7 @@ const Audio = {
     this.sendV = ctx.createGain(); this.sendV.gain.value = 0; this.sendV._amt = 0;
     this.busH.connect(this.sendH); this.sendH.connect(this.reverb);
     this.busV.connect(this.sendV); this.sendV.connect(this.reverb);
+    Perc.init(ctx, this.master);
   },
   setColorful(on){
     this.colorful = on;
@@ -997,6 +1006,120 @@ $('mixN').oninput = e=>{ if(Audio.busN) Audio.busN.gain.value=+e.target.value; }
 $('mixR').oninput = e=>{ if(Audio.busR) Audio.busR.gain.value=+e.target.value; };
 $('colorful').onchange = e=>Audio.setColorful(e.target.checked);
 
+// ------------------------------------------------------------- перкуссия
+// Озвучка дискретных событий поколения: sf.percussion (см. server.py:
+// WebViewer._merge_events и sound/features.py) — {kind: {n, pan}}, плюс
+// churn голосов организмов (sf.births/deaths, уже существовавшие поля,
+// раньше только двигавшие огибающую голоса, а отдельным ударом никогда не
+// звучавшие). ПРИНЦИПИАЛЬНО без ритма/сетки/BPM: каждое событие бьёт ровно
+// в момент, когда пришёл кадр с ним, с небольшим случайным (не
+// квантованным!) разбросом внутри пачки — так же нерегулярно, как сама
+// жизнь клеток. Максимум переключателей на каждый тип события — чтобы
+// можно было включать/выключать и крутить погромче/повыше по отдельности.
+const PERC_KINDS = [
+  {key:'kill',         label:'охота (хищник поймал жертву)',  color:'#f2683c', hz:900,  type:'snap'},
+  {key:'starve',       label:'голод (гибель животного)',       color:'#8b949e', hz:70,   type:'thud'},
+  {key:'birth_animal', label:'рождение животного',             color:'#4a9ef2', hz:520,  type:'blip'},
+  {key:'birth_plant',  label:'рождение растения',              color:'#7bd94a', hz:260,  type:'pluck'},
+  {key:'shock',        label:'выветривание',                   color:'#d9d9d9', hz:2200, type:'crackle'},
+  {key:'dissolve',     label:'растворение камня',               color:'#c05ce0', hz:1400, type:'ping'},
+  {key:'organism',     label:'голос организма (родился/погиб)', color:'#f2c14e', hz:180,  type:'tom'},
+];
+const PERC_DUR = {snap:0.05, thud:0.22, blip:0.09, pluck:0.16, crackle:0.06, ping:0.35, tom:0.18};
+
+const Perc = {
+  ctx: null, master: null, on: false, spread: 0.12, cap: 6, noiseBuf: null,
+  kinds: {},   // key -> {on, gain, pitch} — потрогать/поприглушать по отдельности
+  init(ctx, dest){
+    if (this.ctx) return;
+    this.ctx = ctx;
+    this.master = ctx.createGain(); this.master.gain.value = +$('percVol').value;
+    this.master.connect(dest);
+    const len = ctx.sampleRate, buf = ctx.createBuffer(1, len, ctx.sampleRate), d = buf.getChannelData(0);
+    for (let i=0;i<len;i++) d[i] = Math.random()*2-1;
+    this.noiseBuf = buf;
+    for (const k of PERC_KINDS) this.kinds[k.key] = this.kinds[k.key] || {on:true, gain:0.7, pitch:1};
+  },
+  // один удар: шумовой щелчок через фильтр (свой для каждого типа) вместе с
+  // тональным "телом" (кроме чисто шумовых snap/crackle) — без семплов,
+  // всё генерируется на лету, поэтому разные события легко различимы на слух
+  hit(kind, t, pan, vel){
+    const cfg = PERC_KINDS.find(k=>k.key===kind); const st = this.kinds[kind];
+    if (!this.ctx || !cfg || !st || !st.on) return;
+    const ctx = this.ctx, hz = cfg.hz*st.pitch, dur = PERC_DUR[cfg.type] || 0.12;
+    const amp = Math.min(1.5, vel) * st.gain;
+    const g = ctx.createGain(); g.gain.value = 1;
+    const p = ctx.createStereoPanner(); p.pan.value = Math.max(-1, Math.min(1, pan||0));
+    g.connect(p); p.connect(this.master);
+    const src = ctx.createBufferSource(); src.buffer = this.noiseBuf;
+    const bp = ctx.createBiquadFilter();
+    bp.type = cfg.type==='thud' ? 'lowpass' : (cfg.type==='crackle' ? 'highpass' : 'bandpass');
+    bp.frequency.value = hz; bp.Q.value = cfg.type==='crackle' ? 0.7 : 4;
+    const ng = ctx.createGain();
+    src.connect(bp); bp.connect(ng); ng.connect(g);
+    src.start(t); src.stop(t+dur+0.02);
+    ng.gain.setValueAtTime(0.0001, t); ng.gain.linearRampToValueAtTime(amp*0.7, t+0.004);
+    ng.gain.exponentialRampToValueAtTime(0.0005, t+dur);
+    if (cfg.type !== 'crackle' && cfg.type !== 'snap'){
+      const osc = ctx.createOscillator();
+      osc.type = cfg.type==='ping' ? 'triangle' : 'sine';
+      osc.frequency.setValueAtTime(hz * (cfg.type==='blip' ? 1 : 2), t);
+      const og = ctx.createGain();
+      osc.connect(og); og.connect(g);
+      osc.start(t); osc.stop(t+dur+0.02);
+      og.gain.setValueAtTime(0.0001, t); og.gain.linearRampToValueAtTime(amp, t+0.005);
+      og.gain.exponentialRampToValueAtTime(0.0005, t+dur);
+      if (cfg.type==='thud' || cfg.type==='tom') osc.frequency.exponentialRampToValueAtTime(Math.max(20,hz*0.4), t+dur);
+      if (cfg.type==='blip') osc.frequency.exponentialRampToValueAtTime(hz*2.2, t+dur*0.6);
+    }
+    setTimeout(()=>{ try{ g.disconnect(); p.disconnect(); }catch(e){} }, (dur+0.15)*1000);
+  },
+  // одно событие поколения: n затронутых клеток, до cap реальных ударов из
+  // уже присланных позиций (pan), громкость каждого — от общего n, а не от
+  // числа реально сыгранных ударов, иначе крупное событие не звучало бы крупнее
+  burst(kind, t, data){
+    if (!data) return;
+    const pans = (data.pan && data.pan.length) ? data.pan : [0];
+    const hits = Math.min(this.cap, pans.length);
+    const vel = Math.sqrt(Math.min(data.n, 64) / 8) || 0.3;
+    for (let i=0;i<hits;i++) this.hit(kind, t + Math.random()*this.spread, pans[i], vel);
+  },
+  trigger(sf){
+    if (!this.on || !this.ctx || !sf || !Audio.on) return;
+    const t = this.ctx.currentTime;
+    const perc = sf.percussion || {};
+    for (const kind in perc) this.burst(kind, t, perc[kind]);
+    // churn голосов организмов — раньше только двигал огибающую голоса,
+    // отдельным ударом не звучал
+    for (const vid of (sf.births||[])){
+      const v = (sf.voices||[]).find(x=>x.vid===vid);
+      this.hit('organism', t + Math.random()*this.spread, v?v.pan:0, 1.0);
+    }
+    for (const vid of (sf.deaths||[])){
+      this.hit('organism', t + Math.random()*this.spread, 0, 0.7);
+    }
+  },
+};
+function buildPercKinds(){
+  const box = $('percKinds'); if (!box) return; box.innerHTML='';
+  for (const k of PERC_KINDS){
+    const st = Perc.kinds[k.key] || (Perc.kinds[k.key] = {on:true, gain:0.7, pitch:1});
+    const row = document.createElement('div'); row.className='row muted';
+    row.innerHTML = `<label class="sp" style="min-width:210px"><input type="checkbox" ${st.on?'checked':''} data-on><span class="sw" style="background:${k.color}"></span>${k.label}</label>`+
+      `гр. <input type="range" min="0" max="1.5" step="0.05" value="${st.gain}" data-gain style="width:60px">`+
+      `тон <input type="range" min="0.4" max="2.2" step="0.05" value="${st.pitch}" data-pitch style="width:60px">`;
+    row.querySelector('[data-on]').onchange = e=>{ st.on = e.target.checked; };
+    row.querySelector('[data-gain]').oninput = e=>{ st.gain = +e.target.value; };
+    row.querySelector('[data-pitch]').oninput = e=>{ st.pitch = +e.target.value; };
+    box.appendChild(row);
+  }
+}
+buildPercKinds();
+$('percOn').onchange = e=>{ Perc.on = e.target.checked; };
+$('percVol').oninput = e=>{ if (Perc.master) Perc.master.gain.setTargetAtTime(+e.target.value, Perc.ctx.currentTime, 0.05); };
+$('percSpread').oninput = e=>{ Perc.spread = +e.target.value; };
+$('percCap').oninput = e=>{ Perc.cap = +e.target.value; };
+
 // водопад: 64 строки (полосы куба снизу вверх), столбец на кадр, яркость = амплитуда, оттенок = шум
 const WF = { canvas: $('waterfall'), col: 0, w: 240, h: 64, ctx: null, img: null,
   init(){ this.canvas.width=this.w; this.canvas.height=this.h; this.ctx=this.canvas.getContext('2d');
@@ -1009,7 +1132,7 @@ const WF = { canvas: $('waterfall'), col: 0, w: 240, h: 64, ctx: null, img: null
 
 // --------------------------------------------- API для тестов и скриптов
 window.viewer = {
-  S, gl, applyFrame, Audio, WF, CFG, COL, draw: ()=>{ dirty=false; draw(); },
+  S, gl, applyFrame, Audio, WF, Perc, CFG, COL, draw: ()=>{ dirty=false; draw(); },
   send, labOpen, geneSliders, speciesButtons,
   set(k,v){ S[k]=v; dirty=true; }, setView(v){ setView(v); dirty=true; },
   readPixels(){ resize(); draw(); const w=canvas.width,h=canvas.height; const px=new Uint8Array(w*h*4); gl.readPixels(0,0,w,h,gl.RGBA,gl.UNSIGNED_BYTE,px); return {w,h,px}; },
