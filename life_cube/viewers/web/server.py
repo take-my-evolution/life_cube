@@ -140,6 +140,14 @@ class WebViewer:
         self.latest_sound = None
         self._sent = {}            # что клиентам уже отправлено (рельеф, имена)
         self._heavy_task = None    # фоновая разметка организмов (см. broadcaster)
+        # Перкуссия: события поколения (Engine.publish -> snap.events)
+        # копятся тут между фактическими отправками кадра, а не сразу в
+        # latest_sound — publish() может вызываться чаще, чем broadcaster()
+        # реально шлёт кадр (симуляция быстрее fps), и тогда события
+        # "промежуточных" поколений, если их не копить, потерялись бы molча:
+        # каждое новое latest_sound просто затирало бы предыдущее. Копим —
+        # и раздаём накопленное РОВНО в момент реальной отправки.
+        self._events_acc = {}
         engine.on_snapshot(self._on_snapshot)
 
     # вызывается из потока симуляции
@@ -148,9 +156,22 @@ class WebViewer:
             self.latest_sound = self.mapper.map(snap)
         except Exception:               # звук не должен ронять симуляцию
             self.latest_sound = None
+        if snap.events:
+            self._merge_events(snap.events)
         self.latest = snap
         if self.loop is not None:
             self.loop.call_soon_threadsafe(self._new.set)
+
+    def _merge_events(self, events):
+        """Копит события поколений между отправками кадра. Панораму (-1..1)
+        считаем сразу — избегаем тащить в клиент n мира только ради этого."""
+        n = max(self.engine.cfg.n - 1, 1)
+        for kind, data in events.items():
+            acc = self._events_acc.setdefault(kind, {"n": 0, "pan": []})
+            acc["n"] += data["n"]
+            acc["pan"].extend(round(2 * x / n - 1, 3) for x in data["x"])
+            if len(acc["pan"]) > 32:          # не даём расти неограниченно
+                acc["pan"] = acc["pan"][:32]
 
     async def broadcaster(self):
         """Кадры уходят не чаще fps и только зрителям. Если движок не
@@ -201,6 +222,12 @@ class WebViewer:
             if snap is None or not self.clients or snap is last_sent:
                 continue
             last_sent = snap
+            # раздаём накопленные события РОВНО здесь — на фактической
+            # отправке, а не на каждом publish(); дальше latest_sound снова
+            # копит с нуля до следующей отправки
+            if self._events_acc and self.latest_sound is not None:
+                self.latest_sound.percussion = self._events_acc
+                self._events_acc = {}
             # Кодирование (включая json.dumps заголовка) — В ПОТОКЕ: на
             # большом мире это десятки мс, и в цикле событий оно душило сервер
             data = await asyncio.get_running_loop().run_in_executor(

@@ -21,6 +21,7 @@
 
 import numpy as np
 
+from .backend import sample_event
 from .config import IDX
 
 DIRS = ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
@@ -65,7 +66,12 @@ def animals_step(state, cfg, xp, correlate, rng):
     G = cfg.genomes
     mobile = cfg.mobile_mask()
     if not mobile.any():
-        return
+        return {}
+
+    # перкуссия (см. life_cube.backend.sample_event): каждое дискретное
+    # событие этого поколения — охота, гибель, деление — отдельный тип
+    # удара на клиенте. Собираем по ходу дела, без лишних проходов по миру.
+    events = {}
 
     i_hunt, i_tro = IDX["hunt"], IDX["trophic"]
     i_spd, i_sns = IDX["speed"], IDX["sense"]
@@ -112,6 +118,9 @@ def animals_step(state, cfg, xp, correlate, rng):
             got += shift(share, tuple(-k for k in d), xp)
         gain = xp.where(me, gain + cfg.eat_efficiency * got, gain)
 
+    ev = sample_event(killed, xp)
+    if ev:
+        events["kill"] = ev
     if bool(killed.any()):
         species = xp.where(killed, xp.int8(0), species)
         energy = xp.where(killed, xp.float32(0), energy)
@@ -221,11 +230,15 @@ def animals_step(state, cfg, xp, correlate, rng):
     energy = xp.where(anim, energy - met, energy)
     age = xp.where(anim, age + 1, age)
     dead = anim & ((energy <= 0) | ((lifespan > 0) & (age.astype(xp.float32) > lifespan)))
+    ev = sample_event(dead, xp)
+    if ev:
+        events["starve"] = ev
     species = xp.where(dead, xp.int8(0), species)
     energy = xp.where(dead, xp.float32(0), energy)
     age = xp.where(dead, xp.int32(0), age)
 
     # --- 5. деление по энергии ----------------------------------------------
+    newborn = xp.zeros(species.shape, dtype=bool)      # для перкуссии
     for s in np.flatnonzero(mobile) + 1:
         g = G[s - 1]
         repro = float(g[i_rep])
@@ -259,5 +272,11 @@ def animals_step(state, cfg, xp, correlate, rng):
             age = xp.where(took, xp.int32(0), age)
             energy = xp.where(parent, energy * 0.5, energy)
             placed = placed | parent
+            newborn = newborn | took
+
+    ev = sample_event(newborn, xp)
+    if ev:
+        events["birth_animal"] = ev
 
     state["species"], state["energy"], state["age"] = species, energy, age
+    return events

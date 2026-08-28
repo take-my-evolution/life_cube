@@ -46,6 +46,14 @@ class SoundFrame:
     # клиентом для режима "Кристалл": каждая полоса красится по своему виду
     # вместо плоского целочисленного обертона.
     band_species: list = field(default_factory=list)
+    # Перкуссия — дискретные события поколения (охота, гибель, деление...),
+    # {kind: {"n": сколько клеток затронуто, "pan": [-1..1, до 32]}}.
+    # ЕДИНСТВЕННОЕ поле SoundFrame, которое заполняет не SoundMapper.map(), а
+    # сам WebViewer (см. server.py: WebViewer._merge_events/broadcaster) —
+    # потому что события нужно копить МЕЖДУ снимками (иначе часть терялась
+    # бы, когда симуляция быстрее, чем реально уходящие клиенту кадры), а
+    # SoundMapper видит только один snap за раз и такой памяти не имеет.
+    percussion: dict = field(default_factory=dict)
 
     def to_dict(self):
         d = asdict(self)

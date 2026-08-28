@@ -34,3 +34,19 @@ def max_filter_for(xp):
 def to_cpu(a):
     """Снять массив с GPU, если он там."""
     return a.get() if hasattr(a, "get") else a
+
+
+def sample_event(mask, xp, cap=8):
+    """Дёшево описать одно дискретное событие поколения (охота, рождение,
+    выветривание...) для перкуссии на клиенте: сколько клеток затронуто (для
+    громкости/числа ударов) и где по x — выборка, не полный список, для
+    панорамы. None, если событие в этом поколении не произошло.
+
+    xp.count_nonzero — просто сумма по булеву массиву, той же цены, что и
+    уже сделанные в коде проверки bool(mask.any()). argwhere зовём только
+    когда что-то реально есть, и берём только первые cap совпадений."""
+    n = int(xp.count_nonzero(mask))
+    if n == 0:
+        return None
+    coords = to_cpu(xp.argwhere(mask))
+    return {"n": n, "x": coords[:cap, 0].astype(float).tolist()}
