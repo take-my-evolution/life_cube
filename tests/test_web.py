@@ -136,6 +136,58 @@ def test_top_view_scales_with_population(page, server):
     page.evaluate("viewer.set('speciesMask',[1,1,1,1,1,1,1,1]); viewer.set('proj','persp'); viewer.setView('iso'); viewer.set('showStone', true)")
 
 
+def test_particle_render_mode_shows_life_and_matches_species_colors(page, server):
+    """Рендер «Частицы» (#renderMode='particles') — второй шейдерный
+    конвейер (gl.POINTS + сферический импостор, см. VS_PTS/FS_PTS) поверх
+    ТЕХ ЖЕ инстанс-буферов, что и кубы, просто нарисованных иначе. Не
+    проверяем пиксель-в-пиксель совпадение с кубами (частицы круглые, со
+    щелями между собой — по конструкции менее плотная заливка), но состав
+    по видам должен остаться узнаваемым, и переключение обратно на кубы
+    обязано вернуть прежнюю картинку."""
+    page.evaluate("viewer.set('ghost', false); viewer.set('showStone', false); viewer.set('showSoil', false)")
+    cubes_before = hist(page)
+    live_cubes = sum(v for k, v in cubes_before.items() if k.startswith("s"))
+    assert live_cubes > 200, cubes_before
+
+    page.evaluate("viewer.set('renderMode', 'particles')")
+    assert page.evaluate("viewer.S.renderMode") == "particles"
+    particles = hist(page)
+    live_particles = sum(v for k, v in particles.items() if k.startswith("s"))
+    assert live_particles > 100, particles
+    for s in (1, 2, 3, 4, 5):
+        key = f"s{s}"
+        if cubes_before.get(key, 0) > 30:
+            assert particles.get(key, 0) > 0, (s, cubes_before, particles)
+    # круглые импосторы вписаны в клетку ~1 мировая единица — по конструкции
+    # не могут закрасить весь квадрат грани куба (круг в квадрате — не
+    # больше ~79% площади), так что суммарная площадь должна заметно
+    # просесть. Заодно ловит немой переключатель: если бы 'particles' тихо
+    # рисовал теми же кубами, live_particles совпало бы с live_cubes.
+    assert live_particles < live_cubes, (live_cubes, live_particles)
+
+    page.evaluate("viewer.set('renderMode', 'cubes')")
+    assert page.evaluate("viewer.S.renderMode") == "cubes"
+    cubes_after = hist(page)
+    live_after = sum(v for k, v in cubes_after.items() if k.startswith("s"))
+    assert live_after == pytest.approx(live_cubes, rel=0.05)
+    page.evaluate("viewer.set('showStone', true); viewer.set('showSoil', true)")
+
+
+def test_particle_size_slider_changes_covered_area(page, server):
+    """Ползунок размера частиц (#ptSize -> S.ptSize -> uSizeMul в шейдере)
+    должен реально влиять на картинку: больше точки — больше закрашенных
+    пикселей, а не мёртвый контрол."""
+    page.evaluate("viewer.set('ghost', false); viewer.set('showStone', false); viewer.set('showSoil', false);"
+                  " viewer.set('renderMode', 'particles')")
+    page.evaluate("viewer.set('ptSize', 0.3)")
+    small = sum(v for k, v in hist(page).items() if k.startswith("s"))
+    page.evaluate("viewer.set('ptSize', 2.0)")
+    big = sum(v for k, v in hist(page).items() if k.startswith("s"))
+    assert big > small * 1.3, (small, big)
+    page.evaluate("viewer.set('ptSize', 0.9); viewer.set('renderMode', 'cubes');"
+                  " viewer.set('showStone', true); viewer.set('showSoil', true)")
+
+
 def test_select_organism(page, server):
     comps = server["engine"].last_snapshot.components
     big = comps[0]

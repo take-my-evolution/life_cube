@@ -158,6 +158,14 @@
   </div>
   <div class="row"><button id="btnExport">Скопировать пресет</button> <button id="btnImport">Вставить пресет</button></div>
 
+  <h3>Рендер</h3>
+  <div class="row">
+    <button data-render="cubes" class="on">Кубы</button>
+    <button data-render="particles">Частицы</button>
+  </div>
+  <div class="row muted" id="renderHint">частицы — сферические импосторы в шейдере вместо мешей кубов, тот же куб данных</div>
+  <div class="row muted">размер частиц <input id="ptSize" type="range" style="width:80px" min="0.3" max="2" step="0.05" value="0.9"></div>
+
   <h3>Проекция</h3>
   <div class="row">
     <button data-proj="persp" class="on">Перспектива</button>
@@ -243,6 +251,7 @@ const S = {   // состояние вьюера (window.viewer читает/п�
   clipZ: 1e9, slab: 0, speciesMask: new Array(256).fill(1), colorMode: 'species',
   minSize: 1, ghost: true, selected: 0, showStone: true, showSoil: true, showWater: true,
   paused: false, rate: 0, measured: 0, frames: 0, connected: false, autoHz: true,
+  renderMode: 'cubes', ptSize: 0.9,
 };
 const $ = id => document.getElementById(id);
 
@@ -309,7 +318,90 @@ gl.useProgram(prog);
 const U = {}; for (const nm of ['uVP','uMask','uClipZ','uSlabLo','uSlabHi','uMinSize','uSelected','uColorMode','uGhost','uShowStone','uShowSoil','uShowWater','uWaterPass'])
   U[nm] = gl.getUniformLocation(prog, nm);
 const uColLoc = gl.getUniformLocation(prog, 'uCol');
-function uploadPalette(){ const arr=new Float32Array(256*3); for (let i=0;i<256;i++){ const c=COL[i]||[0.6,0.6,0.6]; arr[i*3]=c[0]; arr[i*3+1]=c[1]; arr[i*3+2]=c[2]; } gl.uniform3fv(uColLoc, arr); }
+
+// -------------------------------------------------------- рендер «Частицы»
+// Второй шейдерный конвейер поверх ТЕХ ЖЕ инстанс-буферов (B.cell/sp/lab/
+// size/kind/height, см. rebuildInstances ниже) — данные для кубов и для
+// частиц одни и те же, разный только способ их нарисовать. Вместо
+// instanced-меша куба (36 вершин на клетку) тут ровно одна вершина на
+// клетку — gl.POINTS, размер точки считается в шейдере (gl_PointSize) по
+// расстоянию до камеры, форма — не плоский квадрат точки, а сферический
+// импостор: нормаль восстанавливается из gl_PointCoord (как у GPU-частиц
+// в играх), отсюда объём и блик, а не просто закрашенный кружок.
+const VS_PTS = `#version 300 es
+precision highp float;
+layout(location=0) in vec3 aCell;
+layout(location=1) in float aSpecies;
+layout(location=2) in float aLabel;
+layout(location=3) in float aSize;
+layout(location=4) in float aKind;
+layout(location=5) in float aHeight;
+uniform mat4 uVP;
+uniform float uMask[256];
+uniform float uClipZ, uSlabLo, uSlabHi, uMinSize, uSelected, uColorMode, uGhost, uShowStone, uShowSoil, uShowWater, uWaterPass;
+uniform float uPointScale, uSizeMul;
+uniform vec3 uCol[256];
+out vec3 vCol; out float vGhost; out float vKind;
+vec3 hashCol(float id){ float h = fract(sin(id*12.9898)*43758.5453); float h2 = fract(sin(id*78.233)*12345.678);
+  float hh = h*6.0; vec3 c = clamp(abs(mod(hh+vec3(0,4,2),6.0)-3.0)-1.0,0.0,1.0); return mix(vec3(0.45), c, 0.65+0.35*h2); }
+void main(){
+  float visible = 1.0;
+  if (aCell.z > uClipZ) visible = 0.0;
+  if (aCell.y < uSlabLo || aCell.y > uSlabHi) visible = 0.0;
+  float ghost = 0.0;
+  vec3 col;
+  if (aKind < 0.5) {
+    float m = uMask[int(aSpecies) - 1];
+    bool filt = (m < 0.5) || (aSize < uMinSize) || (uSelected > 0.5 && abs(aLabel-uSelected) > 0.5);
+    if (filt) { if (uGhost > 0.5) ghost = 1.0; else visible = 0.0; }
+    col = uColorMode < 0.5 ? uCol[int(aSpecies) & 255] : hashCol(aLabel);
+  } else if (aKind < 1.5) { col = vec3(0.30,0.31,0.35); if (uShowStone < 0.5) visible = 0.0; }
+  else if (aKind < 2.5) { col = vec3(0.35,0.25,0.16); if (uShowSoil < 0.5) visible = 0.0; }
+  else { col = vec3(0.16,0.40,0.72); if (uShowWater < 0.5) visible = 0.0; }
+  // вода — вторым, полупрозрачным проходом (как у кубов)
+  if ((uWaterPass > 0.5) != (aKind > 2.5)) visible = 0.0;
+  // центр столба по высоте: у живых клеток aHeight==1, у столбов рельефа
+  // (террейн-движки) — центр самого столба, а не его подошва
+  vec3 p = vec3(aCell.x + 0.5, aCell.y + 0.5, aCell.z + max(aHeight, 1.0) * 0.5);
+  gl_Position = visible > 0.5 ? uVP * vec4(p, 1.0) : vec4(2.0, 2.0, 2.0, 1.0);
+  // высокие столбы рельефа рисуем точкой покрупнее — частица не может
+  // растянуться в колонну, но так хотя бы заметно отличает "много" от "мало"
+  float sizeFactor = aKind < 0.5 ? 1.0 : clamp(sqrt(max(aHeight, 1.0)), 1.0, 3.0);
+  float sc = ghost > 0.5 ? 0.4 : 1.0;
+  gl_PointSize = clamp(uPointScale * uSizeMul * sizeFactor * sc / max(gl_Position.w, 0.001), 1.0, 200.0);
+  vCol = col; vGhost = ghost; vKind = aKind;
+}`;
+const FS_PTS = `#version 300 es
+precision highp float;
+in vec3 vCol; in float vGhost; in float vKind; out vec4 o;
+void main(){
+  vec2 uv = gl_PointCoord * 2.0 - 1.0;
+  float d2 = dot(uv, uv);
+  if (d2 > 1.0) discard;
+  // сферический импостор: нормаль купола точки восстановлена из её
+  // экранных координат — точка светится и затеняется как маленький шарик,
+  // а не как плоский закрашенный кружок
+  vec3 nrm = vec3(uv, sqrt(max(0.0, 1.0 - d2)));
+  vec3 L = normalize(vec3(0.4, 0.3, 0.85));
+  float diff = 0.45 + 0.55 * max(dot(nrm, L), 0.0);
+  vec3 c = vCol * diff;
+  if (vGhost > 0.5) c = mix(vec3(0.05,0.06,0.08), c, 0.35);
+  float edge = smoothstep(1.0, 0.82, sqrt(d2));   // мягкий сглаженный край без MSAA
+  float alpha = vKind > 2.5 ? 0.6 * edge : edge;  // вода — полупрозрачна
+  if (alpha < 0.02) discard;
+  o = vec4(c, alpha);
+}`;
+const progPts = gl.createProgram();
+gl.attachShader(progPts, compile(gl.VERTEX_SHADER, VS_PTS)); gl.attachShader(progPts, compile(gl.FRAGMENT_SHADER, FS_PTS));
+gl.linkProgram(progPts); if (!gl.getProgramParameter(progPts, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(progPts));
+const UP = {}; for (const nm of ['uVP','uMask','uClipZ','uSlabLo','uSlabHi','uMinSize','uSelected','uColorMode','uGhost','uShowStone','uShowSoil','uShowWater','uWaterPass','uPointScale','uSizeMul'])
+  UP[nm] = gl.getUniformLocation(progPts, nm);
+const uColLocPts = gl.getUniformLocation(progPts, 'uCol');
+
+function uploadPalette(){ const arr=new Float32Array(256*3); for (let i=0;i<256;i++){ const c=COL[i]||[0.6,0.6,0.6]; arr[i*3]=c[0]; arr[i*3+1]=c[1]; arr[i*3+2]=c[2]; }
+  gl.useProgram(prog); gl.uniform3fv(uColLoc, arr);
+  gl.useProgram(progPts); gl.uniform3fv(uColLocPts, arr);
+  gl.useProgram(prog); }
 uploadPalette();
 
 // куб: 6 граней × 2 треугольника, с нормалями
@@ -327,6 +419,17 @@ const B = { cell: buf(2, new Uint16Array(3), 3, gl.UNSIGNED_SHORT, 1), sp: buf(3
             lab: buf(4, new Float32Array(1), 1, gl.FLOAT, 1), size: buf(5, new Float32Array(1), 1, gl.FLOAT, 1),
             kind: buf(6, new Uint8Array(1), 1, gl.UNSIGNED_BYTE, 1),
             height: buf(7, new Float32Array(1), 1, gl.FLOAT, 1) };
+// VAO для «Частиц» — ТЕ ЖЕ буферы B.*, что и у кубов (ничего не
+// дублируется), но без per-instance divisor и без меша куба: каждая
+// клетка — ровно одна вершина, gl.POINTS вместо gl.drawArraysInstanced.
+const vaoPts = gl.createVertexArray(); gl.bindVertexArray(vaoPts);
+function bindAttr(loc, buffer, size, type, norm=false){ gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, size, type, norm, 0, 0); }
+bindAttr(0, B.cell, 3, gl.UNSIGNED_SHORT); bindAttr(1, B.sp, 1, gl.UNSIGNED_BYTE);
+bindAttr(2, B.lab, 1, gl.FLOAT); bindAttr(3, B.size, 1, gl.FLOAT);
+bindAttr(4, B.kind, 1, gl.UNSIGNED_BYTE); bindAttr(5, B.height, 1, gl.FLOAT);
+gl.bindVertexArray(vao);   // вернули текущим — дальше код этого не ждёт, но так чище
+
 let instCount = 0, liveCount = 0;
 gl.enable(gl.DEPTH_TEST); gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK); gl.clearColor(0.051,0.059,0.078,1);
 
@@ -404,27 +507,57 @@ let dirty = true;
 function resize(){ const r=canvas.getBoundingClientRect(); const dpr=Math.min(2, devicePixelRatio||1);
   const w=Math.round(r.width*dpr), h=Math.round(r.height*dpr);
   if (canvas.width!==w||canvas.height!==h){ canvas.width=w; canvas.height=h; gl.viewport(0,0,w,h); dirty=true; } }
+// униформы-фильтры одинаковы для обоих конвейеров (кубы/частицы) — набор
+// имён совпадает (U и UP заполнены одним и тем же списком имён), поэтому
+// установка общая, разнится только сама программа/VAO/способ отрисовки
+function setFilterUniforms(U_){
+  gl.uniformMatrix4fv(U_.uVP, false, viewProj());
+  { const m=new Float32Array(256); for (let i=0;i<256;i++) m[i]=S.speciesMask[i]===0?0:1; gl.uniform1fv(U_.uMask, m); }
+  gl.uniform1f(U_.uClipZ, S.clipZ);
+  const half = S.slab>0 ? S.slab/2 : 1e9, yc = S.n/2 - 0.5;
+  gl.uniform1f(U_.uSlabLo, S.slab>0 ? yc-half : -1e9); gl.uniform1f(U_.uSlabHi, S.slab>0 ? yc+half : 1e9);
+  gl.uniform1f(U_.uMinSize, S.minSize); gl.uniform1f(U_.uSelected, S.selected);
+  gl.uniform1f(U_.uColorMode, S.colorMode==='species'?0:1); gl.uniform1f(U_.uGhost, S.ghost?1:0);
+  gl.uniform1f(U_.uShowStone, S.showStone?1:0); gl.uniform1f(U_.uShowSoil, S.showSoil?1:0);
+  gl.uniform1f(U_.uShowWater, S.showWater?1:0);
+}
 function draw(){
   resize();
   gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
   if (instCount){
-    gl.uniformMatrix4fv(U.uVP,false,viewProj());
-    { const m=new Float32Array(256); for (let i=0;i<256;i++) m[i]=S.speciesMask[i]===0?0:1; gl.uniform1fv(U.uMask, m); }
-    gl.uniform1f(U.uClipZ, S.clipZ);
-    const half = S.slab>0 ? S.slab/2 : 1e9, yc = S.n/2 - 0.5;
-    gl.uniform1f(U.uSlabLo, S.slab>0 ? yc-half : -1e9); gl.uniform1f(U.uSlabHi, S.slab>0 ? yc+half : 1e9);
-    gl.uniform1f(U.uMinSize, S.minSize); gl.uniform1f(U.uSelected, S.selected);
-    gl.uniform1f(U.uColorMode, S.colorMode==='species'?0:1); gl.uniform1f(U.uGhost, S.ghost?1:0);
-    gl.uniform1f(U.uShowStone, S.showStone?1:0); gl.uniform1f(U.uShowSoil, S.showSoil?1:0);
-    gl.uniform1f(U.uShowWater, S.showWater?1:0);
-    gl.bindVertexArray(vao);
-    gl.uniform1f(U.uWaterPass, 0);
-    gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, instCount);
-    if (S.hasWater && S.showWater){    // вода — полупрозрачным проходом поверх
-      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
-      gl.uniform1f(U.uWaterPass, 1);
+    if (S.renderMode === 'particles'){
+      gl.useProgram(progPts);
+      setFilterUniforms(UP);
+      // пикселей на мировую единицу на w=1: для перспективы это константа,
+      // делённая в шейдере на gl_Position.w (расстояние до камеры) — точки
+      // дальше меньше; для ортографики w всегда 1, размер не меняется с
+      // расстоянием, как и положено ортографической проекции
+      const f = 1 / Math.tan(0.45);
+      const pxPerUnit = S.proj === 'persp' ? f * canvas.height / 2 : canvas.height / (S.dist * 0.9 || 1);
+      gl.uniform1f(UP.uPointScale, pxPerUnit); gl.uniform1f(UP.uSizeMul, S.ptSize);
+      gl.bindVertexArray(vaoPts);
+      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+      gl.uniform1f(UP.uWaterPass, 0);
+      gl.drawArrays(gl.POINTS, 0, instCount);
+      if (S.hasWater && S.showWater){    // вода — вторым проходом, как у кубов
+        gl.depthMask(false);
+        gl.uniform1f(UP.uWaterPass, 1);
+        gl.drawArrays(gl.POINTS, 0, instCount);
+        gl.depthMask(true);
+      }
+      gl.disable(gl.BLEND);
+    } else {
+      gl.useProgram(prog);
+      setFilterUniforms(U);
+      gl.bindVertexArray(vao);
+      gl.uniform1f(U.uWaterPass, 0);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, instCount);
-      gl.depthMask(true); gl.disable(gl.BLEND);
+      if (S.hasWater && S.showWater){    // вода — полупрозрачным проходом поверх
+        gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
+        gl.uniform1f(U.uWaterPass, 1);
+        gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, instCount);
+        gl.depthMask(true); gl.disable(gl.BLEND);
+      }
     }
   }
   S.frames++;
@@ -454,6 +587,8 @@ $('btnStep').onclick = ()=>send({cmd:'step'});
 $('btnReset').onclick = ()=>send({cmd:'reset', seed_world:+$('seedWorld').value, seed_mut:+$('seedMut').value});
 const rateOf = v => v<-0.9 ? 0 : Math.pow(10, v);
 $('rate').oninput = e=>{ const r=rateOf(+e.target.value); $('rateLbl').textContent = r? r.toFixed(r<1?2:1)+' пок/с' : 'без предела'; send({cmd:'rate', value:r}); };
+document.querySelectorAll('[data-render]').forEach(b=>b.onclick=()=>{ S.renderMode=b.dataset.render; document.querySelectorAll('[data-render]').forEach(x=>x.classList.toggle('on',x===b)); dirty=true; });
+$('ptSize').oninput = e=>{ S.ptSize=+e.target.value; dirty=true; };
 document.querySelectorAll('[data-proj]').forEach(b=>b.onclick=()=>{ S.proj=b.dataset.proj; document.querySelectorAll('[data-proj]').forEach(x=>x.classList.toggle('on',x===b)); dirty=true; });
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{ setView(b.dataset.view); dirty=true; });
 document.querySelectorAll('[data-color]').forEach(b=>b.onclick=()=>{ S.colorMode=b.dataset.color; document.querySelectorAll('[data-color]').forEach(x=>x.classList.toggle('on',x===b)); dirty=true; });
