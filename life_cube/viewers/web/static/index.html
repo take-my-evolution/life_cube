@@ -121,6 +121,8 @@
   <div class="row muted">микс: гармоники <input id="mixH" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.7">
     голоса <input id="mixV" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.6">
     шум <input id="mixN" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.3"></div>
+  <div class="row"><label class="sp"><input type="checkbox" id="colorful"> Кристалл (красочный режим)</label></div>
+  <div class="row muted" id="colorfulHint">полосы звучат аккордом по видам, голоса — хором, добавлен реверб <input id="mixR" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.3"></div>
   <canvas id="waterfall" title="спектр-водопад: 64 полосы куба снизу вверх, время слева направо"></canvas>
 
   <h3>Геном</h3>
@@ -797,9 +799,48 @@ $('btnImport').onclick=()=>{ const t=prompt('вставь пресет JSON:'); 
 // ------------------------------------------------------------------ звук
 // Бэкенд Web Audio по SoundFrame (hdr.sound). Модель та же, что в sound/synth.py:
 // 64 осциллятора-гармоники + шум по энтропии + пул голосов организмов.
+//
+// "Кристалл" — опциональный красочный режим (не меняет обычный по умолчанию):
+//   * гармоники полос не сидят на плоском целочисленном ряду (baseHz*h), а
+//     квантуются в ту же пентатонику, что и base_hz на бэкенде, при этом
+//     ступень задаёт доминирующий вид полосы (sf.band_species) — куб звучит
+//     аккордом, окраска которого меняется вместе с тем, кто где живёт;
+//   * у каждого голоса организма появляется второй, слегка расстроенный
+//     осциллятор (хор/детюн), сдвиг которого детерминирован по виду —
+//     разные виды звучат разным "цветом" тембра, а не одинаковым треугольником;
+//   * добавлена шина реверба (синтетический IR — экспоненциально затухающий
+//     шум), в которую в красочном режиме идёт пост-фейдерный посыл с шин
+//     гармоник и голосов, для объёма и "красочности" вместо сухого сигнала.
 const Audio = {
   ctx: null, on: false, nb: 64, harm: [], noise: null, noiseGain: null, master: null,
-  busH: null, busV: null, busN: null, voices: new Map(), baseHz: 55, frame: null,
+  busH: null, busV: null, busN: null, busR: null, reverb: null, sendH: null, sendV: null,
+  voices: new Map(), baseHz: 55, frame: null, colorful: false,
+  PENTA: [0, 3, 5, 7, 10, 12, 15, 17, 19, 22],
+  // детерминированный сдвиг в центах по id вида — не аудио-рандом каждый
+  // кадр, а стабильная "окраска" вида, чтобы он всегда звучал одинаково
+  speciesDetune(sp){
+    if (!sp) return 0;
+    const x = Math.sin(sp*12.9898)*43758.5453;
+    return ((x - Math.floor(x)) - 0.5) * 12;   // -6..+6 центов
+  },
+  // частота полосы в красочном режиме: ступень пентатоники берёт доминирующий
+  // вид полосы (та же логика, что base_from_world() в sound/features.py),
+  // октаву — номер полосы, плюс видовой детюн для "разноцветности"
+  bandColorFreq(h, sp){
+    const degree = this.PENTA[(sp>0 ? sp-1 : h) % this.PENTA.length];
+    const octave = Math.floor(h/8);
+    const cents = this.speciesDetune(sp);
+    return this.baseHz * Math.pow(2, octave + degree/12 + cents/1200);
+  },
+  makeReverbIR(ctx, seconds, decay){
+    const len = Math.max(1, Math.floor(ctx.sampleRate*seconds));
+    const ir = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let ch=0; ch<2; ch++){
+      const d = ir.getChannelData(ch);
+      for (let i=0;i<len;i++) d[i] = (Math.random()*2-1) * Math.pow(1 - i/len, decay);
+    }
+    return ir;
+  },
   init(){
     if (this.ctx) return;
     const ctx = this.ctx = new (window.AudioContext||window.webkitAudioContext)();
@@ -813,7 +854,7 @@ const Audio = {
     for (let h=1; h<=this.nb; h++){
       const o = ctx.createOscillator(); o.type='sine'; o.frequency.value = this.baseHz*h;
       const g = ctx.createGain(); g.gain.value = 0; o.connect(g); g.connect(this.busH); o.start();
-      this.harm.push({o,g});
+      this.harm.push({o,g,_f:this.baseHz*h});
     }
     // шум: буфер белого шума + фильтр, громкость по энтропии
     const len = ctx.sampleRate*2, buf = ctx.createBuffer(1,len,ctx.sampleRate), d = buf.getChannelData(0);
@@ -823,10 +864,36 @@ const Audio = {
     this.noiseGain = ctx.createGain(); this.noiseGain.gain.value=0;
     src.connect(bp); bp.connect(this.noiseGain); this.noiseGain.connect(this.busN); src.start();
     this.noise = {src,bp};
+    // реверб: синтетический IR, посылы с шин гармоник/голосов включаются
+    // только в "Кристалле" (см. #colorful) — в обычном режиме sendH/sendV на 0
+    this.reverb = ctx.createConvolver();
+    this.reverb.buffer = this.makeReverbIR(ctx, 2.5, 3);
+    this.busR = ctx.createGain(); this.busR.gain.value = +$('mixR').value;
+    this.reverb.connect(this.busR); this.busR.connect(this.master);
+    this.sendH = ctx.createGain(); this.sendH.gain.value = 0; this.sendH._amt = 0;
+    this.sendV = ctx.createGain(); this.sendV.gain.value = 0; this.sendV._amt = 0;
+    this.busH.connect(this.sendH); this.sendH.connect(this.reverb);
+    this.busV.connect(this.sendV); this.sendV.connect(this.reverb);
+  },
+  setColorful(on){
+    this.colorful = on;
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const hAmt = on ? 0.15 : 0, vAmt = on ? 0.35 : 0;
+    this.sendH.gain.setTargetAtTime(hAmt, t, 0.3); this.sendH._amt = hAmt;
+    this.sendV.gain.setTargetAtTime(vAmt, t, 0.3); this.sendV._amt = vAmt;
+    if (!on){
+      // возвращаем полосы на плоский целочисленный ряд и глушим хоровые голоса
+      this.harm.forEach((x,i)=>{ const f=this.baseHz*(i+1); x.o.frequency.setTargetAtTime(f,t,0.3); x._f=f; });
+      for (const v of this.voices.values()) if (v.g2) v.g2.gain.setTargetAtTime(0, t, 0.2);
+    }
   },
   setBase(hz){ this.baseHz=hz; if(!this.ctx) return; const t=this.ctx.currentTime;
-    this.harm.forEach((x,i)=>x.o.frequency.setTargetAtTime(hz*(i+1), t, 0.05));
-    for (const v of this.voices.values()) v.o.frequency.setTargetAtTime(hz*v.h, t, 0.05); },
+    if (!this.colorful){ this.harm.forEach((x,i)=>{ const f=hz*(i+1); x.o.frequency.setTargetAtTime(f,t,0.05); x._f=f; }); }
+    for (const v of this.voices.values()){
+      v.o.frequency.setTargetAtTime(hz*v.h, t, 0.05);
+      if (v.o2) v.o2.frequency.setTargetAtTime(hz*v.h*Math.pow(2, this.speciesDetune(v.sp)/1200), t, 0.05);
+    } },
   apply(sf){
     this.frame = sf; if (!this.ctx || !this.on || !sf) return;
     // основной тон приходит из мира (его считает SoundMapper по населению)
@@ -835,9 +902,14 @@ const Audio = {
       $('baseHz').value = Math.round(sf.base_hz);
     }
     const t = this.ctx.currentTime, tau = 0.08, sr2 = this.ctx.sampleRate/2;
+    const bandSp = sf.band_species || [];
     let entW=0, aSum=0;
     for (let h=0; h<this.nb; h++){
-      const f = this.baseHz*(h+1); const a = f<sr2 ? sf.harmonics[h]/Math.sqrt(h+1) : 0;
+      const f = this.colorful ? this.bandColorFreq(h, bandSp[h]||0) : this.baseHz*(h+1);
+      if (Math.abs((this.harm[h]._f ?? f) - f) > 0.01){
+        this.harm[h].o.frequency.setTargetAtTime(f, t, 0.3); this.harm[h]._f = f;
+      }
+      const a = f<sr2 ? sf.harmonics[h]/Math.sqrt(h+1) : 0;
       this.harm[h].g.gain.setTargetAtTime(a*0.25, t, tau);
       entW += sf.harmonics[h]*sf.noise[h]; aSum += sf.harmonics[h];
     }
@@ -852,7 +924,12 @@ const Audio = {
         lfo.connect(lg); lg.connect(o.frequency); lfo.start();
         const g=this.ctx.createGain(); g.gain.value=0; const p=this.ctx.createStereoPanner(); p.pan.value=v.pan;
         o.connect(g); g.connect(p); p.connect(this.busV); o.start();
-        node={o,g,p,lg,h:v.harmonic}; this.voices.set(v.vid,node);
+        // второй осциллятор — хор/детюн по виду, включён только в "Кристалле"
+        const o2=this.ctx.createOscillator(); o2.type='sine';
+        o2.frequency.value=this.baseHz*v.harmonic*Math.pow(2, this.speciesDetune(v.species)/1200);
+        const g2=this.ctx.createGain(); g2.gain.value=0;
+        o2.connect(g2); g2.connect(p); o2.start();
+        node={o,g,p,lg,h:v.harmonic,sp:v.species,o2,g2}; this.voices.set(v.vid,node);
         // рождение: короткий всплеск
         g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(0.5/Math.pow(v.harmonic,0.3), t+0.03);
       } else if (Math.abs(node.h - v.harmonic) > 1e-6){
@@ -864,20 +941,23 @@ const Audio = {
         // должен плавно скользить, а не молчать об этом изменении
         node.h = v.harmonic;
         node.o.frequency.setTargetAtTime(this.baseHz*v.harmonic, t, 0.4);
+        node.o2.frequency.setTargetAtTime(this.baseHz*v.harmonic*Math.pow(2, this.speciesDetune(node.sp)/1200), t, 0.4);
       }
       node.g.gain.setTargetAtTime(0.3*v.amp/Math.pow(v.harmonic,0.3), t, 0.15);
+      node.g2.gain.setTargetAtTime(this.colorful ? 0.15*v.amp/Math.pow(v.harmonic,0.3) : 0, t, 0.15);
       node.p.pan.setTargetAtTime(v.pan, t, 0.3);
       node.lg.gain.setTargetAtTime(v.vib*this.baseHz*v.harmonic*0.02, t, 0.2);
     }
     for (const [vid,node] of this.voices){ if (seen.has(vid)) continue;
       node.g.gain.setTargetAtTime(0, t, 0.25);          // гибель: затухание
-      setTimeout(()=>{ try{node.o.stop(); node.lg.disconnect(); node.g.disconnect();}catch(e){} }, 1500);
+      node.g2.gain.setTargetAtTime(0, t, 0.25);
+      setTimeout(()=>{ try{node.o.stop(); node.o2.stop(); node.lg.disconnect(); node.g.disconnect(); node.g2.disconnect();}catch(e){} }, 1500);
       this.voices.delete(vid); }
   },
   toggle(){
     this.init(); if (this.ctx.state==='suspended') this.ctx.resume();
     this.on=!this.on; if(!this.on){ const t=this.ctx.currentTime; this.harm.forEach(x=>x.g.gain.setTargetAtTime(0,t,0.05)); this.noiseGain.gain.setTargetAtTime(0,t,0.05);
-      for (const v of this.voices.values()) v.g.gain.setTargetAtTime(0,t,0.05); }
+      for (const v of this.voices.values()){ v.g.gain.setTargetAtTime(0,t,0.05); v.g2.gain.setTargetAtTime(0,t,0.05); } }
     else this.apply(this.frame);
     $('btnAudio').textContent = this.on?'Выключить звук':'Включить звук'; $('btnAudio').classList.toggle('on',this.on);
     $('audioState').textContent = this.on ? `вкл, ${this.ctx.sampleRate} Гц` : 'выкл';
@@ -890,6 +970,8 @@ $('autoHz').onchange = e=>{ S.autoHz = e.target.checked; };
 $('mixH').oninput = e=>{ if(Audio.busH) Audio.busH.gain.value=+e.target.value; };
 $('mixV').oninput = e=>{ if(Audio.busV) Audio.busV.gain.value=+e.target.value; };
 $('mixN').oninput = e=>{ if(Audio.busN) Audio.busN.gain.value=+e.target.value; };
+$('mixR').oninput = e=>{ if(Audio.busR) Audio.busR.gain.value=+e.target.value; };
+$('colorful').onchange = e=>Audio.setColorful(e.target.checked);
 
 // водопад: 64 строки (полосы куба снизу вверх), столбец на кадр, яркость = амплитуда, оттенок = шум
 const WF = { canvas: $('waterfall'), col: 0, w: 240, h: 64, ctx: null, img: null,

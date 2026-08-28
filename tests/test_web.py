@@ -392,3 +392,56 @@ def test_voice_pitch_glides_instead_of_freezing(page, server):
     h2 = page.evaluate("viewer.Audio.voices.get(777).h")
     assert h2 == 2, "частота голоса застыла на исходной гармонике"
     assert page.evaluate("viewer.Audio.voices.size") == 1, "должен быть тот же голос, не новый"
+
+
+def test_colorful_mode_recolors_bands_and_opens_reverb_send(page, server):
+    """"Кристалл" — опциональный красочный режим (checkbox #colorful, выкл по
+    умолчанию): полосы должны звучать не плоским целочисленным рядом
+    гармоник (baseHz*h), а аккордом, окрашенным доминирующим видом полосы
+    (sf.band_species), и должен открыться посыл в реверб. Выключение режима
+    обязано вернуть полосы на плоский ряд и закрыть посыл.
+
+    page — фикстура модульного масштаба и мир мог быть не на паузе (другие
+    тесты его возобновляют) — значит настоящие кадры от сервера продолжают
+    прилетать параллельно. apply() и чтение результата объединены в один
+    evaluate(), чтобы между "применили" и "прочитали" не мог вклиниться
+    реальный кадр (JS однопоточный — внутри одного evaluate() это атомарно).
+    Заодно звук включаем явно, а не слепым кликом (тот бы просто выключил
+    уже включённый предыдущим тестом звук, и apply() молча вышел бы по
+    !this.on)."""
+    if not page.evaluate("viewer.Audio.on"):
+        page.click("#btnAudio")
+    page.wait_for_timeout(200)
+    assert page.evaluate("viewer.Audio.on") is True
+    assert page.evaluate("viewer.Audio.colorful") is False   # по умолчанию выключен
+
+    def sound_frame(dominant_species):
+        band_species = [0] * 64
+        band_species[5] = dominant_species
+        harmonics = [0] * 64
+        harmonics[5] = 1.0
+        return {"gen": 1, "harmonics": harmonics, "noise": [0] * 64, "base_hz": 55,
+                "voices": [], "band_species": band_species}
+
+    apply_and_read = "(sf) => { viewer.Audio.apply(sf); return viewer.Audio.harm[5]._f; }"
+
+    flat_f = page.evaluate(apply_and_read, sound_frame(3))
+    assert flat_f == pytest.approx(55 * 6)   # обычный режим — плоская 6-я гармоника
+
+    page.check("#colorful")
+    assert page.evaluate("viewer.Audio.colorful") is True
+    assert page.evaluate("viewer.Audio.sendH._amt") > 0
+    assert page.evaluate("viewer.Audio.sendV._amt") > 0
+    colorful_f = page.evaluate(apply_and_read, sound_frame(3))
+    assert colorful_f != pytest.approx(flat_f), "частота полосы не изменилась в красочном режиме"
+    # тот же номер полосы, но другой доминирующий вид -> другая нота
+    other_species_f = page.evaluate(apply_and_read, sound_frame(5))
+    assert other_species_f != pytest.approx(colorful_f), "разные виды должны звучать разными нотами"
+
+    page.uncheck("#colorful")
+    assert page.evaluate("viewer.Audio.sendH._amt") == 0
+    back_f = page.evaluate(apply_and_read, sound_frame(3))
+    assert back_f == pytest.approx(flat_f), "выключение режима должно вернуть плоскую гармонику"
+
+    page.click("#btnAudio")   # звук выключен для следующих тестов, как и раньше в файле
+    assert not page.evaluate("viewer.Audio.on")
