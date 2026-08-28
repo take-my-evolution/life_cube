@@ -445,3 +445,60 @@ def test_colorful_mode_recolors_bands_and_opens_reverb_send(page, server):
 
     page.click("#btnAudio")   # звук выключен для следующих тестов, как и раньше в файле
     assert not page.evaluate("viewer.Audio.on")
+
+
+def test_voice_pitch_updates_are_staggered_not_synchronized(page, server):
+    """Баг-жалоба: "циклические ноты... на разной высоте, но интервал
+    подозрительно одинаковый, будто нота нажимается через равный
+    промежуток". Причина: сервер пересчитывает организмов (а с ними —
+    высоту голосов) не каждый кадр, а пачкой, раз в components_hz (и того
+    реже на населённом мире — сама разметка стоит дороже интервала). Когда
+    пачка приходит, ВСЕ голоса, чья гармоника изменилась, получали новую
+    цель ровно в один и тот же момент t — на слух синхронный "щелчок"/аккорд
+    на подозрительно ровном интервале, никак не связанный с тем, что
+    происходит с клетками между пересчётами. voiceJitter должен развести
+    старт скольжения высоты по времени (детерминированно, по vid), так
+    чтобы одновременное изменение гармоники у нескольких голосов не
+    стартовало одним кликом."""
+    if not page.evaluate("viewer.Audio.on"):
+        page.click("#btnAudio")
+    page.wait_for_timeout(200)
+    assert page.evaluate("viewer.Audio.on") is True
+
+    def sf_with_voices(voices):
+        return {"gen": 1, "harmonics": [0] * 64, "noise": [0] * 64, "base_hz": 55,
+                "voices": voices, "band_species": [0] * 64}
+
+    # рождаем два голоса разных id
+    page.evaluate("(sf) => viewer.Audio.apply(sf)", sf_with_voices([
+        {"vid": 501, "harmonic": 6, "amp": 1, "pan": 0, "vib": 0, "species": 1},
+        {"vid": 502, "harmonic": 8, "amp": 1, "pan": 0, "vib": 0, "species": 2},
+    ]))
+    page.wait_for_timeout(50)
+
+    # шпион на setTargetAtTime — фиксируем момент, на который сервер
+    # (сервер тут — сама тестовая функция) планирует старт новой кривой
+    page.evaluate("""() => {
+        window.__calls = [];
+        const orig = AudioParam.prototype.setTargetAtTime;
+        AudioParam.prototype.setTargetAtTime = function(value, startTime, tc){
+            window.__calls.push({value, startTime, ctxTime: viewer.Audio.ctx.currentTime});
+            return orig.call(this, value, startTime, tc);
+        };
+    }""")
+    # оба голоса меняют гармонику ОДНИМ и тем же кадром — именно так и
+    # приходит пачка с сервера раз в components_hz
+    page.evaluate("(sf) => viewer.Audio.apply(sf)", sf_with_voices([
+        {"vid": 501, "harmonic": 2, "amp": 1, "pan": 0, "vib": 0, "species": 1},
+        {"vid": 502, "harmonic": 4, "amp": 1, "pan": 0, "vib": 0, "species": 2},
+    ]))
+    calls = page.evaluate("window.__calls")
+    # 501 -> harmonic 2 => 55*2=110; 502 -> harmonic 4 => 55*4=220 (различимы по value)
+    delay_501 = next(c["startTime"] - c["ctxTime"] for c in calls if c["value"] == pytest.approx(110))
+    delay_502 = next(c["startTime"] - c["ctxTime"] for c in calls if c["value"] == pytest.approx(220))
+    assert delay_501 != pytest.approx(delay_502), \
+        "два голоса меняют высоту синхронно — тот самый синхронный щелчок"
+    assert 0 <= delay_501 < 0.4 and 0 <= delay_502 < 0.4
+
+    page.click("#btnAudio")
+    assert not page.evaluate("viewer.Audio.on")

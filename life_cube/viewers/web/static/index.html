@@ -823,6 +823,22 @@ const Audio = {
     const x = Math.sin(sp*12.9898)*43758.5453;
     return ((x - Math.floor(x)) - 0.5) * 12;   // -6..+6 центов
   },
+  // Организмы пересчитываются на сервере не каждый кадр, а раз в
+  // components_hz (реально — ещё реже: сама разметка на населённом мире
+  // стоит дороже интервала, см. broadcaster() в server.py). Из-за этого все
+  // голоса, чья высота в этот момент меняется, получали новую цель РОВНО в
+  // один и тот же миг — на слух это звучит как синхронный "щелчок"/аккорд
+  // на строго равном интервале, даже когда сама жизнь клеток непрерывна и
+  // ничего настолько регулярного не происходит. voiceJitter — небольшой
+  // детерминированный (по vid) сдвиг старта скольжения высоты и рождения
+  // голоса: тот же самый пересчёт теперь размазывается по ~0.3с вместо
+  // одного щелчка. Детерминированность — чтобы голос всегда сдвигался на
+  // одну и ту же величину (и это было тестируемо), а не дёргался рандомом
+  // каждый кадр.
+  voiceJitter(vid){
+    const x = Math.sin(vid*78.233)*43758.5453;
+    return (x - Math.floor(x)) * 0.32;
+  },
   // частота полосы в красочном режиме: ступень пентатоники берёт доминирующий
   // вид полосы (та же логика, что base_from_world() в sound/features.py),
   // октаву — номер полосы, плюс видовой детюн для "разноцветности"
@@ -930,18 +946,26 @@ const Audio = {
         const g2=this.ctx.createGain(); g2.gain.value=0;
         o2.connect(g2); g2.connect(p); o2.start();
         node={o,g,p,lg,h:v.harmonic,sp:v.species,o2,g2}; this.voices.set(v.vid,node);
-        // рождение: короткий всплеск
-        g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(0.5/Math.pow(v.harmonic,0.3), t+0.03);
+        // рождение: короткий всплеск. Сервер пересчитывает организмов
+        // пачкой раз в components_hz — несколько голосов рождаются в один
+        // и тот же кадр; без сдвига их атаки прозвучали бы синхронным
+        // "стабом" вместо естественного разнобоя (см. voiceJitter выше)
+        const bt = t + this.voiceJitter(v.vid);
+        g.gain.setValueAtTime(0,bt); g.gain.linearRampToValueAtTime(0.5/Math.pow(v.harmonic,0.3), bt+0.03);
       } else if (Math.abs(node.h - v.harmonic) > 1e-6){
         // высота того же голоса (тот же организм) могла подрасти или
         // опуститься между пересчётами — раньше частота застывала навсегда
         // на моменте рождения голоса, а обновлялись только громкость и пан.
         // На разреженном пересчёте организмов (components_hz) это было
         // незаметно, но когда голос долго живёт и организм меняется, звук
-        // должен плавно скользить, а не молчать об этом изменении
+        // должен плавно скользить, а не молчать об этом изменении.
+        // voiceJitter (см. выше) разводит старт скольжения по времени —
+        // иначе целая пачка голосов меняла бы высоту синхронно, одним
+        // щелчком, ровно на интервале пересчёта организмов.
         node.h = v.harmonic;
-        node.o.frequency.setTargetAtTime(this.baseHz*v.harmonic, t, 0.4);
-        node.o2.frequency.setTargetAtTime(this.baseHz*v.harmonic*Math.pow(2, this.speciesDetune(node.sp)/1200), t, 0.4);
+        const gt = t + this.voiceJitter(v.vid);
+        node.o.frequency.setTargetAtTime(this.baseHz*v.harmonic, gt, 0.4);
+        node.o2.frequency.setTargetAtTime(this.baseHz*v.harmonic*Math.pow(2, this.speciesDetune(node.sp)/1200), gt, 0.4);
       }
       node.g.gain.setTargetAtTime(0.3*v.amp/Math.pow(v.harmonic,0.3), t, 0.15);
       node.g2.gain.setTargetAtTime(this.colorful ? 0.15*v.amp/Math.pow(v.harmonic,0.3) : 0, t, 0.15);
