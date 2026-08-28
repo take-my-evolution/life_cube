@@ -363,3 +363,32 @@ def test_genome_lab_forks_species_in_terra(page, server):
         page.evaluate("viewer.CFG.world.n = 32")
         page.evaluate("viewer.send({cmd:'engine', value:'ecology', n:32})")
         page.wait_for_function("viewer.CFG.data && viewer.CFG.data.engine === 'ecology'", timeout=20000)
+
+
+def test_voice_pitch_glides_instead_of_freezing(page, server):
+    """У голоса организма раньше частота застывала навсегда в момент
+    рождения: обновлялись только громкость, пан и вибрато, а высота — нет,
+    даже когда организм вырастал и его гармоника (v.harmonic) менялась.
+    На разреженном пересчёте организмов это было незаметно, но качественно
+    неверно и способствовало ощущению «дискретных нот» вместо плавного звука."""
+    page.click("#btnAudio")
+    page.wait_for_timeout(200)
+    page.evaluate("""() => {
+        const sf1 = {gen: 1, harmonics: new Array(64).fill(0), noise: new Array(64).fill(0),
+                     base_hz: 55, voices: [{vid: 777, harmonic: 6, amp: 1, pan: 0, vib: 0}]};
+        viewer.Audio.apply(sf1);
+    }""")
+    h1 = page.evaluate("viewer.Audio.voices.get(777).h")
+    f1 = page.evaluate("viewer.Audio.voices.get(777).o.frequency.value")
+    assert h1 == 6
+    page.evaluate("""() => {
+        const sf2 = {gen: 2, harmonics: new Array(64).fill(0), noise: new Array(64).fill(0),
+                     base_hz: 55, voices: [{vid: 777, harmonic: 2, amp: 1, pan: 0, vib: 0}]};
+        viewer.Audio.apply(sf2);
+    }""")
+    # тот же голос (тот же vid) — значит организм вырос и стал звучать ниже.
+    # node.h обязан отразить новую гармонику немедленно (это и планирует
+    # скольжение частоты), даже если сам сигнал доедет до цели по рампе.
+    h2 = page.evaluate("viewer.Audio.voices.get(777).h")
+    assert h2 == 2, "частота голоса застыла на исходной гармонике"
+    assert page.evaluate("viewer.Audio.voices.size") == 1, "должен быть тот же голос, не новый"

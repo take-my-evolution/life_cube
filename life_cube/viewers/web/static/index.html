@@ -855,6 +855,15 @@ const Audio = {
         node={o,g,p,lg,h:v.harmonic}; this.voices.set(v.vid,node);
         // рождение: короткий всплеск
         g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(0.5/Math.pow(v.harmonic,0.3), t+0.03);
+      } else if (Math.abs(node.h - v.harmonic) > 1e-6){
+        // высота того же голоса (тот же организм) могла подрасти или
+        // опуститься между пересчётами — раньше частота застывала навсегда
+        // на моменте рождения голоса, а обновлялись только громкость и пан.
+        // На разреженном пересчёте организмов (components_hz) это было
+        // незаметно, но когда голос долго живёт и организм меняется, звук
+        // должен плавно скользить, а не молчать об этом изменении
+        node.h = v.harmonic;
+        node.o.frequency.setTargetAtTime(this.baseHz*v.harmonic, t, 0.4);
       }
       node.g.gain.setTargetAtTime(0.3*v.amp/Math.pow(v.harmonic,0.3), t, 0.15);
       node.p.pan.setTargetAtTime(v.pan, t, 0.3);
