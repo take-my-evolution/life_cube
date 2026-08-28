@@ -188,6 +188,30 @@ def test_particle_size_slider_changes_covered_area(page, server):
                   " viewer.set('showStone', true); viewer.set('showSoil', true)")
 
 
+def test_bonds_draw_lines_between_same_species_neighbors(page, server):
+    """#bondsOn — линии между соседними живыми клетками ОДНОГО вида (см.
+    rebuildBonds/VS_BOND в index.html), нужны, чтобы в режиме «Частицы» было
+    видно форму/границы скоплений, а не только цвет по отдельным точкам —
+    работает по соседству на решётке, а не по organism label/cid (у больших
+    миров разметка компонент выключена, см. componentsOn/hasLabels)."""
+    page.evaluate("viewer.set('ghost', false); viewer.set('showStone', false); viewer.set('showSoil', false);"
+                  " viewer.set('renderMode', 'particles'); viewer.set('ptSize', 0.5); viewer.set('bondsOn', false)")
+    base = sum(v for k, v in hist(page).items() if k.startswith("s"))
+
+    page.evaluate("viewer.set('bondsOn', true)")
+    assert page.evaluate("viewer.S.bondsOn") is True
+    n_bonds = page.evaluate("viewer.bondCount")
+    assert n_bonds > 0, n_bonds        # засеянный + прогнанный мир должен дать соседей одного вида
+    with_bonds = sum(v for k, v in hist(page).items() if k.startswith("s"))
+    # линии рисуются в промежутках между круглыми импосторами (маленький
+    # ptSize нарочно, чтобы были щели) — включённые связи обязаны залить
+    # часть этих щелей цветом вида, то есть увеличить закрашенную площадь
+    assert with_bonds > base, (base, with_bonds)
+
+    page.evaluate("viewer.set('bondsOn', false); viewer.set('ptSize', 0.9); viewer.set('renderMode', 'cubes');"
+                  " viewer.set('showStone', true); viewer.set('showSoil', true)")
+
+
 def test_select_organism(page, server):
     comps = server["engine"].last_snapshot.components
     big = comps[0]
