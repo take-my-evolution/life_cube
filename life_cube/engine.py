@@ -148,11 +148,6 @@ class Engine:
         with self._lock:
             pops = self.rules.step(self.state, self.cfg, self.xp, self.correlate, self.gen)
             self.gen += 1
-            # какому поколению принадлежат события этого шага (перкуссия,
-            # см. Engine.publish) — правила, которые их не считают
-            # (state["last_events"] не выставлен), просто не пишут это поле
-            if "last_events" in self.state:
-                self.state["last_events_gen"] = self.gen
             self.hist.append(pops)
             if self.gen % self.HIST_EVERY == 0:
                 self.hist_long.append(pops)
@@ -201,19 +196,11 @@ class Engine:
                    "soil": (np.zeros((1, 1, 1), bool) if heightmaps
                             else to_cpu(self.state["soil"]).copy())}
             n_species = self.rules.n_species(self.cfg)
-            # события этого поколения (перкуссия) — отдаём РОВНО ОДИН раз:
-            # кто первым спросит снимок после advance(), тот и заберёт (pop),
-            # иначе повторные publish() на том же gen (быстрые такты, пока
-            # симуляция не продвинулась) переигрывали бы тот же удар кадр за
-            # кадром вместо одного события
-            events = (self.state.pop("last_events", None)
-                     if self.state.get("last_events_gen") == gen else None)
         want = self.components if components is None else (components and self.components)
         if want and self.cfg.n ** 3 > self.COMPONENTS_CELL_LIMIT:
             want = False                    # слишком большой мир — без разметки
         snap = make_snapshot(cpu, gen, self.cfg, self.tracker,
                              with_components=want, n_species=n_species)
-        snap.events = events
         if not want:
             # Полную разметку (scipy.label) на этом такте не считаем — дорого
             # (см. WebViewer.broadcaster). Но список организмов не должен

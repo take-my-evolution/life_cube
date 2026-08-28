@@ -136,106 +136,15 @@ def test_top_view_scales_with_population(page, server):
     page.evaluate("viewer.set('speciesMask',[1,1,1,1,1,1,1,1]); viewer.set('proj','persp'); viewer.setView('iso'); viewer.set('showStone', true)")
 
 
-def test_particle_render_mode_shows_life_and_matches_species_colors(page, server):
-    """Рендер «Частицы» (#renderMode='particles') — второй шейдерный
-    конвейер (gl.POINTS + сферический импостор, см. VS_PTS/FS_PTS) поверх
-    ТЕХ ЖЕ инстанс-буферов, что и кубы, просто нарисованных иначе. Не
-    проверяем пиксель-в-пиксель совпадение с кубами (частицы круглые, со
-    щелями между собой — по конструкции менее плотная заливка), но состав
-    по видам должен остаться узнаваемым, и переключение обратно на кубы
-    обязано вернуть прежнюю картинку."""
-    page.evaluate("viewer.set('ghost', false); viewer.set('showStone', false); viewer.set('showSoil', false)")
-    cubes_before = hist(page)
-    live_cubes = sum(v for k, v in cubes_before.items() if k.startswith("s"))
-    assert live_cubes > 200, cubes_before
-
-    page.evaluate("viewer.set('renderMode', 'particles')")
-    assert page.evaluate("viewer.S.renderMode") == "particles"
-    particles = hist(page)
-    live_particles = sum(v for k, v in particles.items() if k.startswith("s"))
-    assert live_particles > 100, particles
-    for s in (1, 2, 3, 4, 5):
-        key = f"s{s}"
-        if cubes_before.get(key, 0) > 30:
-            assert particles.get(key, 0) > 0, (s, cubes_before, particles)
-    # круглые импосторы вписаны в клетку ~1 мировая единица — по конструкции
-    # не могут закрасить весь квадрат грани куба (круг в квадрате — не
-    # больше ~79% площади), так что суммарная площадь должна заметно
-    # просесть. Заодно ловит немой переключатель: если бы 'particles' тихо
-    # рисовал теми же кубами, live_particles совпало бы с live_cubes.
-    assert live_particles < live_cubes, (live_cubes, live_particles)
-
-    page.evaluate("viewer.set('renderMode', 'cubes')")
-    assert page.evaluate("viewer.S.renderMode") == "cubes"
-    cubes_after = hist(page)
-    live_after = sum(v for k, v in cubes_after.items() if k.startswith("s"))
-    assert live_after == pytest.approx(live_cubes, rel=0.05)
-    page.evaluate("viewer.set('showStone', true); viewer.set('showSoil', true)")
-
-
-def test_particle_size_slider_changes_covered_area(page, server):
-    """Ползунок размера частиц (#ptSize -> S.ptSize -> uSizeMul в шейдере)
-    должен реально влиять на картинку: больше точки — больше закрашенных
-    пикселей, а не мёртвый контрол."""
-    page.evaluate("viewer.set('ghost', false); viewer.set('showStone', false); viewer.set('showSoil', false);"
-                  " viewer.set('renderMode', 'particles')")
-    page.evaluate("viewer.set('ptSize', 0.3)")
-    small = sum(v for k, v in hist(page).items() if k.startswith("s"))
-    page.evaluate("viewer.set('ptSize', 2.0)")
-    big = sum(v for k, v in hist(page).items() if k.startswith("s"))
-    assert big > small * 1.3, (small, big)
-    page.evaluate("viewer.set('ptSize', 0.9); viewer.set('renderMode', 'cubes');"
-                  " viewer.set('showStone', true); viewer.set('showSoil', true)")
-
-
-def test_bonds_draw_lines_between_same_species_neighbors(page, server):
-    """#bondsOn — линии между соседними живыми клетками ОДНОГО вида (см.
-    rebuildBonds/VS_BOND в index.html), нужны, чтобы в режиме «Частицы» было
-    видно форму/границы скоплений, а не только цвет по отдельным точкам —
-    работает по соседству на решётке, а не по organism label/cid (у больших
-    миров разметка компонент выключена, см. componentsOn/hasLabels)."""
-    page.evaluate("viewer.set('ghost', false); viewer.set('showStone', false); viewer.set('showSoil', false);"
-                  " viewer.set('renderMode', 'particles'); viewer.set('ptSize', 0.5); viewer.set('bondsOn', false)")
-    base = sum(v for k, v in hist(page).items() if k.startswith("s"))
-
-    page.evaluate("viewer.set('bondsOn', true)")
-    assert page.evaluate("viewer.S.bondsOn") is True
-    n_bonds = page.evaluate("viewer.bondCount")
-    assert n_bonds > 0, n_bonds        # засеянный + прогнанный мир должен дать соседей одного вида
-    with_bonds = sum(v for k, v in hist(page).items() if k.startswith("s"))
-    # линии рисуются в промежутках между круглыми импосторами (маленький
-    # ptSize нарочно, чтобы были щели) — включённые связи обязаны залить
-    # часть этих щелей цветом вида, то есть увеличить закрашенную площадь
-    assert with_bonds > base, (base, with_bonds)
-
-    page.evaluate("viewer.set('bondsOn', false); viewer.set('ptSize', 0.9); viewer.set('renderMode', 'cubes');"
-                  " viewer.set('showStone', true); viewer.set('showSoil', true)")
-
-
 def test_select_organism(page, server):
     comps = server["engine"].last_snapshot.components
     big = comps[0]
-    # клиент узнаёт organism.cid из S.comps не мгновенно — приходит с
-    # ближайшим тяжёлым пересчётом организмов (components_hz), а не с каждым
-    # кадром. Ждём явно, а не надеемся на побочный тайминг соседних тестов
-    # (раньше без этого падал при запуске в изоляции, pytest -k).
-    page.wait_for_function(f"viewer.S.comps.some(c => c[0] === {big.cid})", timeout=5000)
-    # showSoil/showWater — тоже false: почва и вода — не растения/животные,
-    # у них нет aLabel, и их фиксированный цвет террейна на этом (случайном
-    # по seed) мире по хешу гистограммы иногда попадает в тот же "ближайший
-    # по оттенку" бакет, что и цвет какого-то вида — иначе тест изредка ловил
-    # цветные пиксели ПОЧВЫ/ВОДЫ как ложных "не тех" организмов, никак не
-    # связанных с фильтром по selected. showStone уже был здесь по той же
-    # причине — теперь убираем оставшуюся подложку целиком, а не только камень.
-    page.evaluate(f"viewer.set('ghost', false); viewer.set('showStone', false);"
-                  f" viewer.set('showSoil', false); viewer.set('showWater', false);"
-                  f" viewer.set('selected', {big.cid})")
+    page.evaluate(f"viewer.set('ghost', false); viewer.set('showStone', false); viewer.set('selected', {big.cid})")
     h = hist(page)
     key = f"s{big.species}"
     others = sum(h[f"s{s}"] for s in (1, 2, 3, 4, 5) if s != big.species)
     assert h[key] > 0 and others < 30, h
-    page.evaluate("viewer.set('selected', 0); viewer.set('showStone', true);"
-                  " viewer.set('showSoil', true); viewer.set('showWater', true)")
+    page.evaluate("viewer.set('selected', 0); viewer.set('showStone', true)")
 
 
 def test_controls_reach_engine(page, server):
@@ -591,94 +500,5 @@ def test_voice_pitch_updates_are_staggered_not_synchronized(page, server):
         "два голоса меняют высоту синхронно — тот самый синхронный щелчок"
     assert 0 <= delay_501 < 0.4 and 0 <= delay_502 < 0.4
 
-    page.click("#btnAudio")
-    assert not page.evaluate("viewer.Audio.on")
-
-
-def test_percussion_fires_untimed_bursts_for_events(page, server):
-    """Перкуссия (#percOn, выкл по умолчанию): sf.percussion — {kind: {n, pan}}
-    — должна бить сразу, БЕЗ квантования на какую-либо сетку/BPM (явное
-    требование: "ритм делать не нужно", "максимально хаотичный ритм").
-    Проверяем: (1) выключенная перкуссия молчит; (2) включённая бьёт — по
-    одному Perc.hit на позицию из pan (не больше Perc.cap); (3) отключение
-    конкретного типа события заглушает именно его, не трогая остальные;
-    (4) старт каждого удара не привязан к общему такту — случайный джиттер
-    в пределах [0, spread), а не 0 и не фиксированный шаг."""
-    if not page.evaluate("viewer.Audio.on"):
-        page.click("#btnAudio")
-    page.wait_for_timeout(200)
-    assert page.evaluate("viewer.Audio.on") is True
-    assert page.evaluate("viewer.Perc.on") is False   # по умолчанию выключена
-
-    def sf_with_perc(percussion, births=None, deaths=None):
-        return {"gen": 1, "harmonics": [0] * 64, "noise": [0] * 64, "base_hz": 55,
-                "voices": [], "band_species": [0] * 64,
-                "percussion": percussion, "births": births or [], "deaths": deaths or []}
-
-    def spy():
-        # каждый вызов wrap'ает ИСХОДНЫЙ (несвязанный) hit, а не уже
-        # подмененный предыдущим spy() — иначе повторные spy() в этом же
-        # тесте наслаивали бы прокси друг на друга и удваивали счётчик
-        page.evaluate("""() => {
-            if (!viewer.Perc.__origHit) viewer.Perc.__origHit = viewer.Perc.hit;
-            window.__hits = [];
-            viewer.Perc.hit = new Proxy(viewer.Perc.__origHit, {
-                apply(target, thisArg, args){
-                    window.__hits.push({kind: args[0], t: args[1], pan: args[2], vel: args[3]});
-                    return Reflect.apply(target, thisArg, args);
-                }
-            });
-        }""")
-
-    # (1) перкуссия выключена мастер-чекбоксом -> событие не должно звучать
-    spy()
-    page.evaluate("(sf) => viewer.Perc.trigger(sf)",
-                   sf_with_perc({"kill": {"n": 3, "pan": [0.1, 0.2, 0.3]}}))
-    assert page.evaluate("window.__hits.length") == 0
-
-    page.check("#percOn")
-    assert page.evaluate("viewer.Perc.on") is True
-
-    # (2) включена -> бьёт по каждой позиции из pan (n клеток затронуто,
-    # позиций пришло 3 -> 3 удара типа kill)
-    spy()
-    page.evaluate("(sf) => viewer.Perc.trigger(sf)",
-                   sf_with_perc({"kill": {"n": 3, "pan": [0.1, 0.2, 0.3]}}))
-    hits = page.evaluate("window.__hits")
-    assert len(hits) == 3
-    assert all(h["kind"] == "kill" for h in hits)
-    assert sorted(h["pan"] for h in hits) == pytest.approx([0.1, 0.2, 0.3])
-
-    # cap ограничивает число ударов даже когда позиций пришло больше
-    page.evaluate("() => { viewer.Perc.cap = 2; }")
-    spy()
-    page.evaluate("(sf) => viewer.Perc.trigger(sf)",
-                   sf_with_perc({"kill": {"n": 8, "pan": [0, 0.1, 0.2, 0.3, 0.4]}}))
-    assert page.evaluate("window.__hits.length") == 2
-
-    # (3) отключить конкретный тип события — заглушает именно его, остальные звучат
-    page.evaluate("() => { viewer.Perc.kinds.kill.on = false; }")
-    spy()
-    page.evaluate("(sf) => viewer.Perc.trigger(sf)",
-                   sf_with_perc({"kill": {"n": 1, "pan": [0]}, "shock": {"n": 1, "pan": [0.5]}}))
-    kinds_fired = {h["kind"] for h in page.evaluate("window.__hits")}
-    assert "shock" in kinds_fired    # shock всё ещё звучит
-    page.evaluate("() => { viewer.Perc.kinds.kill.on = true; }")   # вернуть, не портить следующий тест
-
-    # (4) хаотичный старт: не квантован, лежит в [0, spread)
-    page.evaluate("() => { viewer.Perc.spread = 0.3; viewer.Perc.cap = 6; }")
-    spy()
-    page.evaluate("(sf) => viewer.Perc.trigger(sf)",
-                   sf_with_perc({"shock": {"n": 6, "pan": [0, 0.1, 0.2, 0.3, 0.4, 0.5]}}))
-    hits = page.evaluate("window.__hits")
-    t0 = page.evaluate("viewer.Audio.ctx.currentTime")
-    offsets = sorted(h["t"] - t0 for h in hits)
-    assert all(0 <= o < 0.3 + 1e-6 for o in offsets)
-    # не все старты совпадают (иначе это снова синхронный "щелчок", а не хаос)
-    assert len(set(round(o, 4) for o in offsets)) > 1
-
-    page.evaluate("() => { if (viewer.Perc.__origHit) viewer.Perc.hit = viewer.Perc.__origHit; }")
-    page.uncheck("#percOn")
-    assert page.evaluate("viewer.Perc.on") is False
     page.click("#btnAudio")
     assert not page.evaluate("viewer.Audio.on")

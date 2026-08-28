@@ -125,14 +125,6 @@
   <div class="row muted" id="colorfulHint">полосы звучат аккордом по видам, голоса — хором, добавлен реверб <input id="mixR" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.3"></div>
   <canvas id="waterfall" title="спектр-водопад: 64 полосы куба снизу вверх, время слева направо"></canvas>
 
-  <h3>Перкуссия</h3>
-  <div class="row muted">события мира (охота, гибель, рождение…) бьют сразу, как случились — без ритма и сетки, специально хаотично</div>
-  <div class="row"><label class="sp"><input type="checkbox" id="percOn"> включить</label>
-    <span class="muted">громкость</span> <input id="percVol" type="range" style="width:60px" min="0" max="1.5" step="0.05" value="0.6"></div>
-  <div class="row muted">разброс старта, с <input id="percSpread" type="range" style="width:60px" min="0" max="0.4" step="0.01" value="0.12">
-    ударов за событие <input id="percCap" type="range" style="width:60px" min="1" max="16" step="1" value="6"></div>
-  <div id="percKinds"></div>
-
   <h3>Геном</h3>
   <div class="row"><button id="btnLab">Лаборатория генома…</button><span class="muted">клавиша G</span></div>
   <div class="row muted" id="geneHint">Геном применяется на лету, мир не пересоздаётся.</div>
@@ -157,16 +149,6 @@
     <button id="btnRandomSeed">Случайный сид</button>
   </div>
   <div class="row"><button id="btnExport">Скопировать пресет</button> <button id="btnImport">Вставить пресет</button></div>
-
-  <h3>Рендер</h3>
-  <div class="row">
-    <button data-render="cubes" class="on">Кубы</button>
-    <button data-render="particles">Частицы</button>
-  </div>
-  <div class="row muted" id="renderHint">частицы — сферические импосторы в шейдере вместо мешей кубов, тот же куб данных</div>
-  <div class="row muted">размер частиц <input id="ptSize" type="range" style="width:80px" min="0.3" max="2" step="0.05" value="0.9"></div>
-  <div class="row"><label><input id="bondsOn" type="checkbox"> связи между клетками</label></div>
-  <div class="row muted">линии между соседними живыми клетками одного вида — видно форму и границы скопления, даже когда организмы не считаются (большой мир)</div>
 
   <h3>Проекция</h3>
   <div class="row">
@@ -253,7 +235,6 @@ const S = {   // состояние вьюера (window.viewer читает/п�
   clipZ: 1e9, slab: 0, speciesMask: new Array(256).fill(1), colorMode: 'species',
   minSize: 1, ghost: true, selected: 0, showStone: true, showSoil: true, showWater: true,
   paused: false, rate: 0, measured: 0, frames: 0, connected: false, autoHz: true,
-  renderMode: 'cubes', ptSize: 0.9, bondsOn: false,
 };
 const $ = id => document.getElementById(id);
 
@@ -320,131 +301,7 @@ gl.useProgram(prog);
 const U = {}; for (const nm of ['uVP','uMask','uClipZ','uSlabLo','uSlabHi','uMinSize','uSelected','uColorMode','uGhost','uShowStone','uShowSoil','uShowWater','uWaterPass'])
   U[nm] = gl.getUniformLocation(prog, nm);
 const uColLoc = gl.getUniformLocation(prog, 'uCol');
-
-// -------------------------------------------------------- рендер «Частицы»
-// Второй шейдерный конвейер поверх ТЕХ ЖЕ инстанс-буферов (B.cell/sp/lab/
-// size/kind/height, см. rebuildInstances ниже) — данные для кубов и для
-// частиц одни и те же, разный только способ их нарисовать. Вместо
-// instanced-меша куба (36 вершин на клетку) тут ровно одна вершина на
-// клетку — gl.POINTS, размер точки считается в шейдере (gl_PointSize) по
-// расстоянию до камеры, форма — не плоский квадрат точки, а сферический
-// импостор: нормаль восстанавливается из gl_PointCoord (как у GPU-частиц
-// в играх), отсюда объём и блик, а не просто закрашенный кружок.
-const VS_PTS = `#version 300 es
-precision highp float;
-layout(location=0) in vec3 aCell;
-layout(location=1) in float aSpecies;
-layout(location=2) in float aLabel;
-layout(location=3) in float aSize;
-layout(location=4) in float aKind;
-layout(location=5) in float aHeight;
-uniform mat4 uVP;
-uniform float uMask[256];
-uniform float uClipZ, uSlabLo, uSlabHi, uMinSize, uSelected, uColorMode, uGhost, uShowStone, uShowSoil, uShowWater, uWaterPass;
-uniform float uPointScale, uSizeMul;
-uniform vec3 uCol[256];
-out vec3 vCol; out float vGhost; out float vKind;
-vec3 hashCol(float id){ float h = fract(sin(id*12.9898)*43758.5453); float h2 = fract(sin(id*78.233)*12345.678);
-  float hh = h*6.0; vec3 c = clamp(abs(mod(hh+vec3(0,4,2),6.0)-3.0)-1.0,0.0,1.0); return mix(vec3(0.45), c, 0.65+0.35*h2); }
-void main(){
-  float visible = 1.0;
-  if (aCell.z > uClipZ) visible = 0.0;
-  if (aCell.y < uSlabLo || aCell.y > uSlabHi) visible = 0.0;
-  float ghost = 0.0;
-  vec3 col;
-  if (aKind < 0.5) {
-    float m = uMask[int(aSpecies) - 1];
-    bool filt = (m < 0.5) || (aSize < uMinSize) || (uSelected > 0.5 && abs(aLabel-uSelected) > 0.5);
-    if (filt) { if (uGhost > 0.5) ghost = 1.0; else visible = 0.0; }
-    col = uColorMode < 0.5 ? uCol[int(aSpecies) & 255] : hashCol(aLabel);
-  } else if (aKind < 1.5) { col = vec3(0.30,0.31,0.35); if (uShowStone < 0.5) visible = 0.0; }
-  else if (aKind < 2.5) { col = vec3(0.35,0.25,0.16); if (uShowSoil < 0.5) visible = 0.0; }
-  else { col = vec3(0.16,0.40,0.72); if (uShowWater < 0.5) visible = 0.0; }
-  // вода — вторым, полупрозрачным проходом (как у кубов)
-  if ((uWaterPass > 0.5) != (aKind > 2.5)) visible = 0.0;
-  // центр столба по высоте: у живых клеток aHeight==1, у столбов рельефа
-  // (террейн-движки) — центр самого столба, а не его подошва
-  vec3 p = vec3(aCell.x + 0.5, aCell.y + 0.5, aCell.z + max(aHeight, 1.0) * 0.5);
-  gl_Position = visible > 0.5 ? uVP * vec4(p, 1.0) : vec4(2.0, 2.0, 2.0, 1.0);
-  // высокие столбы рельефа рисуем точкой покрупнее — частица не может
-  // растянуться в колонну, но так хотя бы заметно отличает "много" от "мало"
-  float sizeFactor = aKind < 0.5 ? 1.0 : clamp(sqrt(max(aHeight, 1.0)), 1.0, 3.0);
-  float sc = ghost > 0.5 ? 0.4 : 1.0;
-  gl_PointSize = clamp(uPointScale * uSizeMul * sizeFactor * sc / max(gl_Position.w, 0.001), 1.0, 200.0);
-  vCol = col; vGhost = ghost; vKind = aKind;
-}`;
-const FS_PTS = `#version 300 es
-precision highp float;
-in vec3 vCol; in float vGhost; in float vKind; out vec4 o;
-void main(){
-  vec2 uv = gl_PointCoord * 2.0 - 1.0;
-  float d2 = dot(uv, uv);
-  if (d2 > 1.0) discard;
-  // сферический импостор: нормаль купола точки восстановлена из её
-  // экранных координат — точка светится и затеняется как маленький шарик,
-  // а не как плоский закрашенный кружок
-  vec3 nrm = vec3(uv, sqrt(max(0.0, 1.0 - d2)));
-  vec3 L = normalize(vec3(0.4, 0.3, 0.85));
-  float diff = 0.45 + 0.55 * max(dot(nrm, L), 0.0);
-  vec3 c = vCol * diff;
-  if (vGhost > 0.5) c = mix(vec3(0.05,0.06,0.08), c, 0.35);
-  float edge = smoothstep(1.0, 0.82, sqrt(d2));   // мягкий сглаженный край без MSAA
-  float alpha = vKind > 2.5 ? 0.6 * edge : edge;  // вода — полупрозрачна
-  if (alpha < 0.02) discard;
-  o = vec4(c, alpha);
-}`;
-const progPts = gl.createProgram();
-gl.attachShader(progPts, compile(gl.VERTEX_SHADER, VS_PTS)); gl.attachShader(progPts, compile(gl.FRAGMENT_SHADER, FS_PTS));
-gl.linkProgram(progPts); if (!gl.getProgramParameter(progPts, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(progPts));
-const UP = {}; for (const nm of ['uVP','uMask','uClipZ','uSlabLo','uSlabHi','uMinSize','uSelected','uColorMode','uGhost','uShowStone','uShowSoil','uShowWater','uWaterPass','uPointScale','uSizeMul'])
-  UP[nm] = gl.getUniformLocation(progPts, nm);
-const uColLocPts = gl.getUniformLocation(progPts, 'uCol');
-
-// -------------------------------------------------------------- «связи»
-// Тонкие линии между соседними живыми клетками ОДНОГО вида (по трём
-// положительным осям, чтобы не считать пару дважды) — так у скопления
-// частиц видна форма и границы, а не только цвет. Специально НЕ завязано
-// на organism label/cid: у больших миров разметка компонент отключена
-// (S.hasLabels=false, см. Engine.COMPONENTS_CELL_LIMIT в движке) — вид +
-// соседство по решётке работает всегда, независимо от размера мира.
-const VS_BOND = `#version 300 es
-precision highp float;
-layout(location=0) in vec3 aPos;
-layout(location=1) in float aSpecies;
-layout(location=2) in float aLabel;
-layout(location=3) in float aSize;
-uniform mat4 uVP;
-uniform float uMask[256];
-uniform float uClipZ, uSlabLo, uSlabHi, uMinSize, uSelected, uColorMode;
-uniform vec3 uCol[256];
-out vec3 vCol;
-vec3 hashCol(float id){ float h = fract(sin(id*12.9898)*43758.5453); float h2 = fract(sin(id*78.233)*12345.678);
-  float hh = h*6.0; vec3 c = clamp(abs(mod(hh+vec3(0,4,2),6.0)-3.0)-1.0,0.0,1.0); return mix(vec3(0.45), c, 0.65+0.35*h2); }
-void main(){
-  float visible = 1.0;
-  if (aPos.z > uClipZ + 0.5) visible = 0.0;
-  if (aPos.y < uSlabLo || aPos.y > uSlabHi) visible = 0.0;
-  float m = uMask[int(aSpecies) - 1];
-  if (m < 0.5 || aSize < uMinSize || (uSelected > 0.5 && abs(aLabel - uSelected) > 0.5)) visible = 0.0;
-  vCol = uColorMode < 0.5 ? uCol[int(aSpecies) & 255] : hashCol(aLabel);
-  gl_Position = visible > 0.5 ? uVP * vec4(aPos, 1.0) : vec4(2.0, 2.0, 2.0, 1.0);
-}`;
-const FS_BOND = `#version 300 es
-precision highp float;
-in vec3 vCol; out vec4 o;
-void main(){ o = vec4(vCol * 0.9, 0.5); }`;
-const progBond = gl.createProgram();
-gl.attachShader(progBond, compile(gl.VERTEX_SHADER, VS_BOND)); gl.attachShader(progBond, compile(gl.FRAGMENT_SHADER, FS_BOND));
-gl.linkProgram(progBond); if (!gl.getProgramParameter(progBond, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(progBond));
-const UB = {}; for (const nm of ['uVP','uMask','uClipZ','uSlabLo','uSlabHi','uMinSize','uSelected','uColorMode'])
-  UB[nm] = gl.getUniformLocation(progBond, nm);
-const uColLocBond = gl.getUniformLocation(progBond, 'uCol');
-
-function uploadPalette(){ const arr=new Float32Array(256*3); for (let i=0;i<256;i++){ const c=COL[i]||[0.6,0.6,0.6]; arr[i*3]=c[0]; arr[i*3+1]=c[1]; arr[i*3+2]=c[2]; }
-  gl.useProgram(prog); gl.uniform3fv(uColLoc, arr);
-  gl.useProgram(progPts); gl.uniform3fv(uColLocPts, arr);
-  gl.useProgram(progBond); gl.uniform3fv(uColLocBond, arr);
-  gl.useProgram(prog); }
+function uploadPalette(){ const arr=new Float32Array(256*3); for (let i=0;i<256;i++){ const c=COL[i]||[0.6,0.6,0.6]; arr[i*3]=c[0]; arr[i*3+1]=c[1]; arr[i*3+2]=c[2]; } gl.uniform3fv(uColLoc, arr); }
 uploadPalette();
 
 // куб: 6 граней × 2 треугольника, с нормалями
@@ -462,25 +319,6 @@ const B = { cell: buf(2, new Uint16Array(3), 3, gl.UNSIGNED_SHORT, 1), sp: buf(3
             lab: buf(4, new Float32Array(1), 1, gl.FLOAT, 1), size: buf(5, new Float32Array(1), 1, gl.FLOAT, 1),
             kind: buf(6, new Uint8Array(1), 1, gl.UNSIGNED_BYTE, 1),
             height: buf(7, new Float32Array(1), 1, gl.FLOAT, 1) };
-// VAO для «Частиц» — ТЕ ЖЕ буферы B.*, что и у кубов (ничего не
-// дублируется), но без per-instance divisor и без меша куба: каждая
-// клетка — ровно одна вершина, gl.POINTS вместо gl.drawArraysInstanced.
-const vaoPts = gl.createVertexArray(); gl.bindVertexArray(vaoPts);
-function bindAttr(loc, buffer, size, type, norm=false){ gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-  gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, size, type, norm, 0, 0); }
-bindAttr(0, B.cell, 3, gl.UNSIGNED_SHORT); bindAttr(1, B.sp, 1, gl.UNSIGNED_BYTE);
-bindAttr(2, B.lab, 1, gl.FLOAT); bindAttr(3, B.size, 1, gl.FLOAT);
-bindAttr(4, B.kind, 1, gl.UNSIGNED_BYTE); bindAttr(5, B.height, 1, gl.FLOAT);
-gl.bindVertexArray(vao);   // вернули текущим — дальше код этого не ждёт, но так чище
-
-// VAO+буферы для «связей» — это НЕ подвыборка B.*, а отдельные данные (пары
-// вершин на ребро), поэтому свои буферы, но тем же способом (buf(), divisor 0)
-const vaoBond = gl.createVertexArray(); gl.bindVertexArray(vaoBond);
-const bondBuf = { pos: buf(0, new Float32Array(3), 3, gl.FLOAT, 0), sp: buf(1, new Uint8Array(1), 1, gl.UNSIGNED_BYTE, 0),
-                   lab: buf(2, new Float32Array(1), 1, gl.FLOAT, 0), size: buf(3, new Float32Array(1), 1, gl.FLOAT, 0) };
-gl.bindVertexArray(vao);
-let bondCount = 0;
-
 let instCount = 0, liveCount = 0;
 gl.enable(gl.DEPTH_TEST); gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK); gl.clearColor(0.051,0.059,0.078,1);
 
@@ -522,33 +360,6 @@ function rebuildInstances(){
   const up=(b,arr)=>{ gl.bindBuffer(gl.ARRAY_BUFFER,b); gl.bufferData(gl.ARRAY_BUFFER,arr.subarray?arr.subarray(0, arr===cell?o*3:o):arr, gl.DYNAMIC_DRAW); };
   up(B.cell, cell); up(B.sp, sp); up(B.lab, lab); up(B.size, size); up(B.kind, kind); up(B.height, hgt);
   instCount = o; liveCount = k;
-  rebuildBonds(cell, sp, lab, size, n, k);
-}
-// связи считаются отдельно (не при каждом toggle рендер-режима/чекбокса, а
-// когда меняются сами данные клеток — rebuildInstances) и заново вызываются
-// вручную из viewer.set()/чекбокса #bondsOn, т.к. клетки не меняются от
-// одного лишь переключения режима отображения
-function rebuildBonds(cell, sp, lab, size, n, k){
-  if (!S.bondsOn || !k){ bondCount = 0; return; }
-  const posMap = new Map();
-  for (let i=0;i<k;i++) posMap.set(cell[i*3] + cell[i*3+1]*n + cell[i*3+2]*n*n, i);
-  const bp=[], bs=[], bl=[], bsz=[];
-  const DIRS = [[1,0,0],[0,1,0],[0,0,1]];
-  for (let i=0;i<k;i++){
-    const x=cell[i*3], y=cell[i*3+1], z=cell[i*3+2], spi=sp[i];
-    for (const [dx,dy,dz] of DIRS){
-      const nx=x+dx, ny=y+dy, nz=z+dz;
-      if (nx>=n || ny>=n || nz>=n) continue;
-      const j = posMap.get(nx + ny*n + nz*n*n);
-      if (j===undefined || sp[j]!==spi) continue;
-      bp.push(x+0.5,y+0.5,z+0.5, nx+0.5,ny+0.5,nz+0.5);
-      bs.push(spi, spi); bl.push(lab[i], lab[j]); bsz.push(size[i], size[j]);
-    }
-  }
-  bondCount = bs.length;
-  const upb=(b,arr)=>{ gl.bindBuffer(gl.ARRAY_BUFFER,b); gl.bufferData(gl.ARRAY_BUFFER, arr, gl.DYNAMIC_DRAW); };
-  upb(bondBuf.pos, new Float32Array(bp)); upb(bondBuf.sp, new Uint8Array(bs));
-  upb(bondBuf.lab, new Float32Array(bl)); upb(bondBuf.size, new Float32Array(bsz));
 }
 
 // ------------------------------------------------------------------ камера
@@ -585,71 +396,27 @@ let dirty = true;
 function resize(){ const r=canvas.getBoundingClientRect(); const dpr=Math.min(2, devicePixelRatio||1);
   const w=Math.round(r.width*dpr), h=Math.round(r.height*dpr);
   if (canvas.width!==w||canvas.height!==h){ canvas.width=w; canvas.height=h; gl.viewport(0,0,w,h); dirty=true; } }
-// униформы-фильтры одинаковы для обоих конвейеров (кубы/частицы) — набор
-// имён совпадает (U и UP заполнены одним и тем же списком имён), поэтому
-// установка общая, разнится только сама программа/VAO/способ отрисовки
-function setFilterUniforms(U_){
-  gl.uniformMatrix4fv(U_.uVP, false, viewProj());
-  { const m=new Float32Array(256); for (let i=0;i<256;i++) m[i]=S.speciesMask[i]===0?0:1; gl.uniform1fv(U_.uMask, m); }
-  gl.uniform1f(U_.uClipZ, S.clipZ);
-  const half = S.slab>0 ? S.slab/2 : 1e9, yc = S.n/2 - 0.5;
-  gl.uniform1f(U_.uSlabLo, S.slab>0 ? yc-half : -1e9); gl.uniform1f(U_.uSlabHi, S.slab>0 ? yc+half : 1e9);
-  gl.uniform1f(U_.uMinSize, S.minSize); gl.uniform1f(U_.uSelected, S.selected);
-  gl.uniform1f(U_.uColorMode, S.colorMode==='species'?0:1); gl.uniform1f(U_.uGhost, S.ghost?1:0);
-  gl.uniform1f(U_.uShowStone, S.showStone?1:0); gl.uniform1f(U_.uShowSoil, S.showSoil?1:0);
-  gl.uniform1f(U_.uShowWater, S.showWater?1:0);
-}
 function draw(){
   resize();
   gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
   if (instCount){
-    if (S.renderMode === 'particles'){
-      gl.useProgram(progPts);
-      setFilterUniforms(UP);
-      // пикселей на мировую единицу на w=1: для перспективы это константа,
-      // делённая в шейдере на gl_Position.w (расстояние до камеры) — точки
-      // дальше меньше; для ортографики w всегда 1, размер не меняется с
-      // расстоянием, как и положено ортографической проекции
-      const f = 1 / Math.tan(0.45);
-      const pxPerUnit = S.proj === 'persp' ? f * canvas.height / 2 : canvas.height / (S.dist * 0.9 || 1);
-      gl.uniform1f(UP.uPointScale, pxPerUnit); gl.uniform1f(UP.uSizeMul, S.ptSize);
-      gl.bindVertexArray(vaoPts);
-      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-      gl.uniform1f(UP.uWaterPass, 0);
-      gl.drawArrays(gl.POINTS, 0, instCount);
-      if (S.hasWater && S.showWater){    // вода — вторым проходом, как у кубов
-        gl.depthMask(false);
-        gl.uniform1f(UP.uWaterPass, 1);
-        gl.drawArrays(gl.POINTS, 0, instCount);
-        gl.depthMask(true);
-      }
-      if (S.bondsOn && bondCount){
-        gl.useProgram(progBond);
-        gl.uniformMatrix4fv(UB.uVP, false, viewProj());
-        { const m=new Float32Array(256); for (let i=0;i<256;i++) m[i]=S.speciesMask[i]===0?0:1; gl.uniform1fv(UB.uMask, m); }
-        gl.uniform1f(UB.uClipZ, S.clipZ);
-        const half = S.slab>0 ? S.slab/2 : 1e9, yc = S.n/2 - 0.5;
-        gl.uniform1f(UB.uSlabLo, S.slab>0 ? yc-half : -1e9); gl.uniform1f(UB.uSlabHi, S.slab>0 ? yc+half : 1e9);
-        gl.uniform1f(UB.uMinSize, S.minSize); gl.uniform1f(UB.uSelected, S.selected);
-        gl.uniform1f(UB.uColorMode, S.colorMode==='species'?0:1);
-        gl.depthMask(false);
-        gl.bindVertexArray(vaoBond);
-        gl.drawArrays(gl.LINES, 0, bondCount);
-        gl.depthMask(true);
-      }
-      gl.disable(gl.BLEND);
-    } else {
-      gl.useProgram(prog);
-      setFilterUniforms(U);
-      gl.bindVertexArray(vao);
-      gl.uniform1f(U.uWaterPass, 0);
+    gl.uniformMatrix4fv(U.uVP,false,viewProj());
+    { const m=new Float32Array(256); for (let i=0;i<256;i++) m[i]=S.speciesMask[i]===0?0:1; gl.uniform1fv(U.uMask, m); }
+    gl.uniform1f(U.uClipZ, S.clipZ);
+    const half = S.slab>0 ? S.slab/2 : 1e9, yc = S.n/2 - 0.5;
+    gl.uniform1f(U.uSlabLo, S.slab>0 ? yc-half : -1e9); gl.uniform1f(U.uSlabHi, S.slab>0 ? yc+half : 1e9);
+    gl.uniform1f(U.uMinSize, S.minSize); gl.uniform1f(U.uSelected, S.selected);
+    gl.uniform1f(U.uColorMode, S.colorMode==='species'?0:1); gl.uniform1f(U.uGhost, S.ghost?1:0);
+    gl.uniform1f(U.uShowStone, S.showStone?1:0); gl.uniform1f(U.uShowSoil, S.showSoil?1:0);
+    gl.uniform1f(U.uShowWater, S.showWater?1:0);
+    gl.bindVertexArray(vao);
+    gl.uniform1f(U.uWaterPass, 0);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, instCount);
+    if (S.hasWater && S.showWater){    // вода — полупрозрачным проходом поверх
+      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
+      gl.uniform1f(U.uWaterPass, 1);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, instCount);
-      if (S.hasWater && S.showWater){    // вода — полупрозрачным проходом поверх
-        gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
-        gl.uniform1f(U.uWaterPass, 1);
-        gl.drawArraysInstanced(gl.TRIANGLES, 0, 36, instCount);
-        gl.depthMask(true); gl.disable(gl.BLEND);
-      }
+      gl.depthMask(true); gl.disable(gl.BLEND);
     }
   }
   S.frames++;
@@ -679,9 +446,6 @@ $('btnStep').onclick = ()=>send({cmd:'step'});
 $('btnReset').onclick = ()=>send({cmd:'reset', seed_world:+$('seedWorld').value, seed_mut:+$('seedMut').value});
 const rateOf = v => v<-0.9 ? 0 : Math.pow(10, v);
 $('rate').oninput = e=>{ const r=rateOf(+e.target.value); $('rateLbl').textContent = r? r.toFixed(r<1?2:1)+' пок/с' : 'без предела'; send({cmd:'rate', value:r}); };
-document.querySelectorAll('[data-render]').forEach(b=>b.onclick=()=>{ S.renderMode=b.dataset.render; document.querySelectorAll('[data-render]').forEach(x=>x.classList.toggle('on',x===b)); dirty=true; });
-$('ptSize').oninput = e=>{ S.ptSize=+e.target.value; dirty=true; };
-$('bondsOn').onchange = e=>{ S.bondsOn=e.target.checked; if (S.coords) rebuildInstances(); dirty=true; };
 document.querySelectorAll('[data-proj]').forEach(b=>b.onclick=()=>{ S.proj=b.dataset.proj; document.querySelectorAll('[data-proj]').forEach(x=>x.classList.toggle('on',x===b)); dirty=true; });
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{ setView(b.dataset.view); dirty=true; });
 document.querySelectorAll('[data-color]').forEach(b=>b.onclick=()=>{ S.colorMode=b.dataset.color; document.querySelectorAll('[data-color]').forEach(x=>x.classList.toggle('on',x===b)); dirty=true; });
@@ -758,7 +522,7 @@ function applyFrame(buf){
   $('btnPause').textContent = S.paused ? 'Продолжить' : 'Пауза'; $('btnPause').classList.toggle('on', S.paused);
   rebuildInstances(); renderTable(); drawPops(); dirty=true;
   labTick();
-  S.sound = hdr.sound; Audio.apply(hdr.sound); WF.push(hdr.sound); Perc.trigger(hdr.sound);
+  S.sound = hdr.sound; Audio.apply(hdr.sound); WF.push(hdr.sound);
   S.connected=true;
 }
 function connect(){
@@ -1126,7 +890,6 @@ const Audio = {
     this.sendV = ctx.createGain(); this.sendV.gain.value = 0; this.sendV._amt = 0;
     this.busH.connect(this.sendH); this.sendH.connect(this.reverb);
     this.busV.connect(this.sendV); this.sendV.connect(this.reverb);
-    Perc.init(ctx, this.master);
   },
   setColorful(on){
     this.colorful = on;
@@ -1234,120 +997,6 @@ $('mixN').oninput = e=>{ if(Audio.busN) Audio.busN.gain.value=+e.target.value; }
 $('mixR').oninput = e=>{ if(Audio.busR) Audio.busR.gain.value=+e.target.value; };
 $('colorful').onchange = e=>Audio.setColorful(e.target.checked);
 
-// ------------------------------------------------------------- перкуссия
-// Озвучка дискретных событий поколения: sf.percussion (см. server.py:
-// WebViewer._merge_events и sound/features.py) — {kind: {n, pan}}, плюс
-// churn голосов организмов (sf.births/deaths, уже существовавшие поля,
-// раньше только двигавшие огибающую голоса, а отдельным ударом никогда не
-// звучавшие). ПРИНЦИПИАЛЬНО без ритма/сетки/BPM: каждое событие бьёт ровно
-// в момент, когда пришёл кадр с ним, с небольшим случайным (не
-// квантованным!) разбросом внутри пачки — так же нерегулярно, как сама
-// жизнь клеток. Максимум переключателей на каждый тип события — чтобы
-// можно было включать/выключать и крутить погромче/повыше по отдельности.
-const PERC_KINDS = [
-  {key:'kill',         label:'охота (хищник поймал жертву)',  color:'#f2683c', hz:900,  type:'snap'},
-  {key:'starve',       label:'голод (гибель животного)',       color:'#8b949e', hz:70,   type:'thud'},
-  {key:'birth_animal', label:'рождение животного',             color:'#4a9ef2', hz:520,  type:'blip'},
-  {key:'birth_plant',  label:'рождение растения',              color:'#7bd94a', hz:260,  type:'pluck'},
-  {key:'shock',        label:'выветривание',                   color:'#d9d9d9', hz:2200, type:'crackle'},
-  {key:'dissolve',     label:'растворение камня',               color:'#c05ce0', hz:1400, type:'ping'},
-  {key:'organism',     label:'голос организма (родился/погиб)', color:'#f2c14e', hz:180,  type:'tom'},
-];
-const PERC_DUR = {snap:0.05, thud:0.22, blip:0.09, pluck:0.16, crackle:0.06, ping:0.35, tom:0.18};
-
-const Perc = {
-  ctx: null, master: null, on: false, spread: 0.12, cap: 6, noiseBuf: null,
-  kinds: {},   // key -> {on, gain, pitch} — потрогать/поприглушать по отдельности
-  init(ctx, dest){
-    if (this.ctx) return;
-    this.ctx = ctx;
-    this.master = ctx.createGain(); this.master.gain.value = +$('percVol').value;
-    this.master.connect(dest);
-    const len = ctx.sampleRate, buf = ctx.createBuffer(1, len, ctx.sampleRate), d = buf.getChannelData(0);
-    for (let i=0;i<len;i++) d[i] = Math.random()*2-1;
-    this.noiseBuf = buf;
-    for (const k of PERC_KINDS) this.kinds[k.key] = this.kinds[k.key] || {on:true, gain:0.7, pitch:1};
-  },
-  // один удар: шумовой щелчок через фильтр (свой для каждого типа) вместе с
-  // тональным "телом" (кроме чисто шумовых snap/crackle) — без семплов,
-  // всё генерируется на лету, поэтому разные события легко различимы на слух
-  hit(kind, t, pan, vel){
-    const cfg = PERC_KINDS.find(k=>k.key===kind); const st = this.kinds[kind];
-    if (!this.ctx || !cfg || !st || !st.on) return;
-    const ctx = this.ctx, hz = cfg.hz*st.pitch, dur = PERC_DUR[cfg.type] || 0.12;
-    const amp = Math.min(1.5, vel) * st.gain;
-    const g = ctx.createGain(); g.gain.value = 1;
-    const p = ctx.createStereoPanner(); p.pan.value = Math.max(-1, Math.min(1, pan||0));
-    g.connect(p); p.connect(this.master);
-    const src = ctx.createBufferSource(); src.buffer = this.noiseBuf;
-    const bp = ctx.createBiquadFilter();
-    bp.type = cfg.type==='thud' ? 'lowpass' : (cfg.type==='crackle' ? 'highpass' : 'bandpass');
-    bp.frequency.value = hz; bp.Q.value = cfg.type==='crackle' ? 0.7 : 4;
-    const ng = ctx.createGain();
-    src.connect(bp); bp.connect(ng); ng.connect(g);
-    src.start(t); src.stop(t+dur+0.02);
-    ng.gain.setValueAtTime(0.0001, t); ng.gain.linearRampToValueAtTime(amp*0.7, t+0.004);
-    ng.gain.exponentialRampToValueAtTime(0.0005, t+dur);
-    if (cfg.type !== 'crackle' && cfg.type !== 'snap'){
-      const osc = ctx.createOscillator();
-      osc.type = cfg.type==='ping' ? 'triangle' : 'sine';
-      osc.frequency.setValueAtTime(hz * (cfg.type==='blip' ? 1 : 2), t);
-      const og = ctx.createGain();
-      osc.connect(og); og.connect(g);
-      osc.start(t); osc.stop(t+dur+0.02);
-      og.gain.setValueAtTime(0.0001, t); og.gain.linearRampToValueAtTime(amp, t+0.005);
-      og.gain.exponentialRampToValueAtTime(0.0005, t+dur);
-      if (cfg.type==='thud' || cfg.type==='tom') osc.frequency.exponentialRampToValueAtTime(Math.max(20,hz*0.4), t+dur);
-      if (cfg.type==='blip') osc.frequency.exponentialRampToValueAtTime(hz*2.2, t+dur*0.6);
-    }
-    setTimeout(()=>{ try{ g.disconnect(); p.disconnect(); }catch(e){} }, (dur+0.15)*1000);
-  },
-  // одно событие поколения: n затронутых клеток, до cap реальных ударов из
-  // уже присланных позиций (pan), громкость каждого — от общего n, а не от
-  // числа реально сыгранных ударов, иначе крупное событие не звучало бы крупнее
-  burst(kind, t, data){
-    if (!data) return;
-    const pans = (data.pan && data.pan.length) ? data.pan : [0];
-    const hits = Math.min(this.cap, pans.length);
-    const vel = Math.sqrt(Math.min(data.n, 64) / 8) || 0.3;
-    for (let i=0;i<hits;i++) this.hit(kind, t + Math.random()*this.spread, pans[i], vel);
-  },
-  trigger(sf){
-    if (!this.on || !this.ctx || !sf || !Audio.on) return;
-    const t = this.ctx.currentTime;
-    const perc = sf.percussion || {};
-    for (const kind in perc) this.burst(kind, t, perc[kind]);
-    // churn голосов организмов — раньше только двигал огибающую голоса,
-    // отдельным ударом не звучал
-    for (const vid of (sf.births||[])){
-      const v = (sf.voices||[]).find(x=>x.vid===vid);
-      this.hit('organism', t + Math.random()*this.spread, v?v.pan:0, 1.0);
-    }
-    for (const vid of (sf.deaths||[])){
-      this.hit('organism', t + Math.random()*this.spread, 0, 0.7);
-    }
-  },
-};
-function buildPercKinds(){
-  const box = $('percKinds'); if (!box) return; box.innerHTML='';
-  for (const k of PERC_KINDS){
-    const st = Perc.kinds[k.key] || (Perc.kinds[k.key] = {on:true, gain:0.7, pitch:1});
-    const row = document.createElement('div'); row.className='row muted';
-    row.innerHTML = `<label class="sp" style="min-width:210px"><input type="checkbox" ${st.on?'checked':''} data-on><span class="sw" style="background:${k.color}"></span>${k.label}</label>`+
-      `гр. <input type="range" min="0" max="1.5" step="0.05" value="${st.gain}" data-gain style="width:60px">`+
-      `тон <input type="range" min="0.4" max="2.2" step="0.05" value="${st.pitch}" data-pitch style="width:60px">`;
-    row.querySelector('[data-on]').onchange = e=>{ st.on = e.target.checked; };
-    row.querySelector('[data-gain]').oninput = e=>{ st.gain = +e.target.value; };
-    row.querySelector('[data-pitch]').oninput = e=>{ st.pitch = +e.target.value; };
-    box.appendChild(row);
-  }
-}
-buildPercKinds();
-$('percOn').onchange = e=>{ Perc.on = e.target.checked; };
-$('percVol').oninput = e=>{ if (Perc.master) Perc.master.gain.setTargetAtTime(+e.target.value, Perc.ctx.currentTime, 0.05); };
-$('percSpread').oninput = e=>{ Perc.spread = +e.target.value; };
-$('percCap').oninput = e=>{ Perc.cap = +e.target.value; };
-
 // водопад: 64 строки (полосы куба снизу вверх), столбец на кадр, яркость = амплитуда, оттенок = шум
 const WF = { canvas: $('waterfall'), col: 0, w: 240, h: 64, ctx: null, img: null,
   init(){ this.canvas.width=this.w; this.canvas.height=this.h; this.ctx=this.canvas.getContext('2d');
@@ -1360,10 +1009,9 @@ const WF = { canvas: $('waterfall'), col: 0, w: 240, h: 64, ctx: null, img: null
 
 // --------------------------------------------- API для тестов и скриптов
 window.viewer = {
-  S, gl, applyFrame, Audio, WF, Perc, CFG, COL, draw: ()=>{ dirty=false; draw(); },
+  S, gl, applyFrame, Audio, WF, CFG, COL, draw: ()=>{ dirty=false; draw(); },
   send, labOpen, geneSliders, speciesButtons,
-  set(k,v){ S[k]=v; if (k==='bondsOn' && S.coords) rebuildInstances(); dirty=true; }, setView(v){ setView(v); dirty=true; },
-  get bondCount(){ return bondCount; },
+  set(k,v){ S[k]=v; dirty=true; }, setView(v){ setView(v); dirty=true; },
   readPixels(){ resize(); draw(); const w=canvas.width,h=canvas.height; const px=new Uint8Array(w*h*4); gl.readPixels(0,0,w,h,gl.RGBA,gl.UNSIGNED_BYTE,px); return {w,h,px}; },
   // подсчёт пикселей по ближайшему цвету вида (для тестов): возвращает {bg, stone, s1..s4, other}
   histogram(){ const {w,h,px}=this.readPixels(); const out={bg:0,stone:0,other:0};

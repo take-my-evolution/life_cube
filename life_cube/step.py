@@ -10,7 +10,6 @@
 
 import numpy as np
 
-from .backend import sample_event
 from .config import IDX, Config
 from .fields import light_field, water_field, water_supply, resource
 from .motion import animals_step
@@ -141,27 +140,8 @@ def step(state: dict, cfg: Config, xp, correlate, gen: int = 0):
 
     state["species"], state["stone"], state["soil"] = new_species, stone, soil
 
-    # перкуссия (см. life_cube.backend.sample_event): каждое дискретное
-    # событие поколения — отдельный тип удара на клиенте. Растительные
-    # события — здесь, животные (охота/гибель/деление) добавляет
-    # animals_step. Складываем в state, а не в возврат step() — pops
-    # (возврат) используется историей населения повсюду как плоский список
-    # чисел, менять его форму не хочется.
-    events = {}
-    ev = sample_event(born, xp)
-    if ev:
-        events["birth_plant"] = ev
-    ev = sample_event(diss, xp)
-    if ev:
-        events["dissolve"] = ev
-    ev = sample_event(shock, xp)
-    if ev:
-        events["shock"] = ev
-
     if mobile.any():
-        events.update(animals_step(state, cfg, xp, correlate, rng) or {})
-
-    state["last_events"] = events
+        animals_step(state, cfg, xp, correlate, rng)
 
     sp = state["species"]
     return [int((sp == s).sum()) for s in range(1, n_sp + 1)]

@@ -41,11 +41,6 @@ class Snapshot:
     stone_h: np.ndarray = None      # (n, n) uint16
     soil_h: np.ndarray = None       # (n, n) uint16
     water_h: np.ndarray = None      # (n, n) uint16
-    # события ЭТОГО поколения (перкуссия) — охота, гибель, деление...
-    # {kind: {"n": сколько клеток, "x": позиции по x, до cap}}, см.
-    # life_cube.backend.sample_event и Engine.publish. None — движок их не
-    # считает или в этом поколении не спрашивали ровно один раз (см. publish).
-    events: dict = None
 
 
 # ---------------------------------------------------------------------------
