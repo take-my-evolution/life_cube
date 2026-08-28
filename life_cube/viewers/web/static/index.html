@@ -123,6 +123,14 @@
     шум <input id="mixN" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.3"></div>
   <div class="row"><label class="sp"><input type="checkbox" id="colorful"> Кристалл (красочный режим)</label></div>
   <div class="row muted" id="colorfulHint">полосы звучат аккордом по видам, голоса — хором, добавлен реверб <input id="mixR" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.3"></div>
+  <div class="row"><label class="sp"><input type="checkbox" id="grainOn"> Гранулы (гранулярный синтез)</label></div>
+  <div class="row muted" id="grainHint">геном вида — короткий сэмпл, каждая живая клетка — зерно этого сэмпла:
+    <b>y</b> (глубина куба) — точка чтения, <b>z</b> — высота тона, <b>x</b> — панорама</div>
+  <div class="row muted">зёрен/с <b id="grainRateLbl">40</b>
+    <input id="grainRate" type="range" style="width:70px" min="4" max="140" step="2" value="40"></div>
+  <div class="row muted">длина зерна <b id="grainMsLbl">70</b> мс
+    <input id="grainMs" type="range" style="width:70px" min="15" max="220" step="5" value="70"></div>
+  <div class="row muted">микс гранул <input id="mixG" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.7"></div>
   <canvas id="waterfall" title="спектр-водопад: 64 полосы куба снизу вверх, время слева направо"></canvas>
 
   <h3>Геном</h3>
@@ -834,6 +842,9 @@ const Audio = {
   ctx: null, on: false, nb: 64, harm: [], noise: null, noiseGain: null, master: null,
   busH: null, busV: null, busN: null, busR: null, reverb: null, sendH: null, sendV: null,
   voices: new Map(), baseHz: 55, frame: null, colorful: false,
+  // гранулы: своя шина, кэш сэмплов по виду и счётчик сыгранных зёрен
+  grainOn: false, grainBufs: new Map(), grainsPlayed: 0, busG: null, sendG: null,
+  hannCurve: null, _grainTimer: null, _grainNext: 0, GRAIN_REF_HZ: 110,
   PENTA: [0, 3, 5, 7, 10, 12, 15, 17, 19, 22],
   // детерминированный сдвиг в центах по id вида — не аудио-рандом каждый
   // кадр, а стабильная "окраска" вида, чтобы он всегда звучал одинаково
@@ -909,6 +920,12 @@ const Audio = {
     this.sendV = ctx.createGain(); this.sendV.gain.value = 0; this.sendV._amt = 0;
     this.busH.connect(this.sendH); this.sendH.connect(this.reverb);
     this.busV.connect(this.sendV); this.sendV.connect(this.reverb);
+    // гранулы: своя шина и свой посыл в реверб (см. блок «гранулярный синтез»)
+    this.busG = ctx.createGain(); this.busG.gain.value = +$('mixG').value;
+    this.busG.connect(this.master);
+    this.sendG = ctx.createGain(); this.sendG.gain.value = 0;
+    this.busG.connect(this.sendG); this.sendG.connect(this.reverb);
+    this.hannCurve = this.hann(64);
   },
   setColorful(on){
     this.colorful = on;
@@ -917,6 +934,7 @@ const Audio = {
     const hAmt = on ? 0.15 : 0, vAmt = on ? 0.35 : 0;
     this.sendH.gain.setTargetAtTime(hAmt, t, 0.3); this.sendH._amt = hAmt;
     this.sendV.gain.setTargetAtTime(vAmt, t, 0.3); this.sendV._amt = vAmt;
+    if (this.sendG) this.sendG.gain.setTargetAtTime(on ? 0.30 : 0, t, 0.3);
     if (!on){
       // возвращаем полосы на плоский целочисленный ряд и глушим хоровые голоса
       this.harm.forEach((x,i)=>{ const f=this.baseHz*(i+1); x.o.frequency.setTargetAtTime(f,t,0.3); x._f=f; });
@@ -997,6 +1015,142 @@ const Audio = {
       setTimeout(()=>{ try{node.o.stop(); node.o2.stop(); node.lg.disconnect(); node.g.disconnect(); node.g2.disconnect();}catch(e){} }, 1500);
       this.voices.delete(vid); }
   },
+  // ------------------------------------------- гранулярный синтез
+  // Классическая схема гранулярного синтеза: есть короткий сэмпл, и вместо
+  // того чтобы играть его целиком, из него сыплется облако «зёрен» —
+  // кусочков в десятки миллисекунд, у каждого своя точка чтения в сэмпле,
+  // своя высота, панорама и оконная огибающая (Ханна — иначе край зерна
+  // щёлкает). Характер задают плотность и длина зерна: редкие длинные —
+  // тягучий пад, частые короткие — шуршащее облако.
+  //
+  // Что здесь наше: сэмпл НЕ записан, а синтезирован из ГЕНОМА вида
+  // (grainBuffer), а зёрна — это живые клетки. Раскладка по осям куба
+  // выбрана так, чтобы ни одна ось не делала две работы сразу:
+  //     вид       -> какой сэмпл (тембр генома)
+  //     y (глубина) -> точка чтения сэмпла   (ось, которая раньше молчала:
+  //                    x уже был панорамой, z — высотой полос)
+  //     z (высота)  -> высота тона           (как у полос: выше — выше)
+  //     x           -> панорама              (как у голосов)
+  // Данные берём из тех же массивов, что уже пришли для рендера
+  // (S.coords/S.species), — ни одного лишнего байта по сети и ни строчки
+  // на сервере; заодно правка гена в лаборатории меняет тембр немедленно.
+  hann(n){ const c=new Float32Array(n); for(let i=0;i<n;i++) c[i]=0.5-0.5*Math.cos(2*Math.PI*i/(n-1)); return c; },
+  // геном вида sp (1-based id): у движков с динамическими видами строки
+  // генома адресуются через CFG.ids, у остальных это просто sp-1
+  genomeRow(sp){
+    if (!CFG.data || !CFG.edited) return null;
+    if (CFG.ids){ const i = CFG.ids.indexOf(sp); return i>=0 ? CFG.edited[i] : null; }
+    return CFG.edited[sp-1] || null;
+  },
+  genomeKey(sp){ const r=this.genomeRow(sp); return r ? sp+':'+r.map(v=>(+v).toFixed(3)).join(',') : null; },
+  // Сэмпл вида из его генома. Главное требование: сэмпл НЕ должен быть
+  // статичным — спектр морфирует от «первой половины генов» к «второй» по
+  // ходу сэмпла, иначе точка чтения (y клетки) была бы не слышна вообще и
+  // всё выродилось бы в один неподвижный аккорд. Всё детерминировано (фазы
+  // и шум — не Math.random): один и тот же геном обязан давать один и тот
+  // же тембр, иначе это ни услышать осознанно, ни проверить тестом.
+  grainBuffer(sp){
+    if (!this.ctx) return null;
+    const key = this.genomeKey(sp); if (!key) return null;
+    const hit = this.grainBufs.get(sp);
+    if (hit && hit.key === key) return hit.buf;
+    const row = this.genomeRow(sp), f = CFG.data.fields;
+    // каждый ген нормируем в 0..1 по его же диапазону: движки разные, и
+    // абсолютные величины несравнимы (repro бывает до 12, absorb до 1)
+    const G = row.map((v,gi)=>{ const r=(CFG.data.ranges||{})[f[gi]]||[0,1];
+      return r[1]>r[0] ? Math.min(1, Math.max(0, (v-r[0])/(r[1]-r[0]))) : 0; });
+    const m = G.length; if (!m) return null;
+    const ctx=this.ctx, sr=ctx.sampleRate, L=Math.floor(sr*0.6);
+    const buf = ctx.createBuffer(1, L, sr), d = buf.getChannelData(0);
+    const NH = 12, half = Math.max(1, m>>1);
+    const mean = G.reduce((a,b)=>a+b,0)/m;
+    const inh = 0.004 + 0.020*(G[m-1] ?? mean);   // негармоничность обертонов
+    const nz  = 0.05  + 0.35 *(G[m>>1]  ?? mean); // доля шума
+    const w = 2*Math.PI*this.GRAIN_REF_HZ/sr;
+    const ph=[]; for(let k=0;k<NH;k++){ const x=Math.sin((k+1)*12.9898)*43758.5453; ph.push((x-Math.floor(x))*2*Math.PI); }
+    let peak=1e-6, seed=(m*2654435761)>>>0 || 1;
+    for (let i=0;i<L;i++){
+      const u = i/L;                     // 0..1 — «время» внутри сэмпла
+      let s = 0;
+      for (let k=0;k<NH;k++){
+        const a0=G[k%m], a1=G[(k+half)%m];
+        s += ((a0 + (a1-a0)*u) / (k+1)) * Math.sin(w*(k+1)*(1+inh*k)*i + ph[k]);
+      }
+      seed = (seed*1664525 + 1013904223) >>> 0;   // детерминированный «шум»
+      s += nz * ((seed/4294967296)*2-1) * (0.3+0.7*u);
+      d[i]=s; const a=Math.abs(s); if (a>peak) peak=a;
+    }
+    for (let i=0;i<L;i++) d[i] /= peak;           // виды одинаково громкие
+    this.grainBufs.set(sp, {key, buf});
+    return buf;
+  },
+  setGrain(on){
+    this.grainOn = on;
+    if (!this.ctx) return;
+    if (this.sendG) this.sendG.gain.setTargetAtTime(this.colorful ? 0.30 : 0, this.ctx.currentTime, 0.3);
+    if (on){
+      this._grainNext = this.ctx.currentTime;
+      if (!this._grainTimer) this._grainTimer = setInterval(()=>this.grainTick(), 40);
+    } else if (this._grainTimer){ clearInterval(this._grainTimer); this._grainTimer=null; }
+  },
+  // Планировщик. setInterval по времени неточен, поэтому зёрна ставятся не
+  // «сейчас», а на СВОИ часы (_grainNext) с запасом вперёд — стандартная
+  // схема планирования в Web Audio: таймер лишь будит планировщик, точное
+  // время даёт ctx.currentTime.
+  grainTick(){
+    if (!this.grainOn || !this.on || !this.ctx || !S.coords || !S.species || !S.k) return;
+    const ctx=this.ctx, now=ctx.currentTime, AHEAD=0.12;
+    if (this._grainNext < now) this._grainNext = now;
+    // контекст на паузе (вкладка/автоплей) — время стоит, копить очередь
+    // на минуты вперёд нельзя: иначе на resume всё выстрелит разом
+    if (this._grainNext - now > 0.5) return;
+    const k = Math.min(S.k, S.species.length, (S.coords.length/3)|0);
+    if (k <= 0) return;
+    const dur = +$('grainMs').value/1000;
+    // плотность растёт с населением: мёртвый мир редко потрескивает, полный —
+    // сплошное облако (та же логика, что у амплитуды полос — громкость несёт
+    // информацию о мире, а не только положение ползунка)
+    const dens = Math.max(1, (+$('grainRate').value) * Math.min(1.4, Math.max(0.12, Math.sqrt(k/5000))));
+    let made=0, built=0;
+    while (this._grainNext < now + AHEAD && made < 48){
+      const i = (Math.random()*k)|0;
+      const sp = S.species[i]|0;
+      // новый сэмпл считается ~единицы мс; на мирах с десятками видов
+      // строим не больше одного за тик, чтобы не морозить поток
+      let buf = sp>0 ? (this.grainBufs.get(sp)||{}).buf : null;
+      if (sp>0 && (!buf || this.grainBufs.get(sp).key !== this.genomeKey(sp))){
+        if (built>0){ this._grainNext += 1/dens; continue; }
+        buf = this.grainBuffer(sp); built++;
+      }
+      if (buf) { this.playGrain(buf, i, sp, this._grainNext, dur, dens); made++; }
+      this._grainNext += 1/dens;
+    }
+  },
+  playGrain(buf, i, sp, when, dur, dens){
+    const ctx=this.ctx, n=Math.max(S.n,1);
+    when = Math.max(when, ctx.currentTime);   // setValueCurveAtTime в прошлое бросает
+    const x=S.coords[i*3], y=S.coords[i*3+1], z=S.coords[i*3+2];
+    const src=ctx.createBufferSource(); src.buffer=buf;
+    // высота: ступень пентатоники по виду (виды складываются в аккорд, а не
+    // в кашу — та же логика, что в «Кристалле») + октава по высоте клетки
+    const deg = this.PENTA[(sp-1) % this.PENTA.length];
+    const oct = Math.round(z/n*3) - 1;
+    src.playbackRate.value = Math.pow(2, oct + deg/12 + this.speciesDetune(sp)/1200) * (this.baseHz/55);
+    const off = Math.max(0, Math.min(buf.duration - dur, buf.duration * (y/n)));
+    const g=ctx.createGain(); g.gain.value=0;
+    const p=ctx.createStereoPanner(); p.pan.value = 2*x/n - 1;
+    src.connect(g); g.connect(p); p.connect(this.busG);
+    // окно Ханна на каждое зерно: без него стык зерна с тишиной щёлкает.
+    // Амплитуда падает как 1/sqrt(плотности) — облако из 100 зёрен в
+    // секунду не должно быть в 100 раз громче облака из одного
+    const amp = 0.5/Math.sqrt(Math.max(dens,1));
+    const curve = new Float32Array(this.hannCurve.length);
+    for (let q=0;q<curve.length;q++) curve[q] = this.hannCurve[q]*amp;
+    try { g.gain.setValueCurveAtTime(curve, when, dur); } catch(e){ return; }
+    src.start(when, off, dur + 0.02);
+    src.onended = ()=>{ try{ src.disconnect(); g.disconnect(); p.disconnect(); }catch(e){} };
+    this.grainsPlayed++;
+  },
   toggle(){
     this.init(); if (this.ctx.state==='suspended') this.ctx.resume();
     this.on=!this.on; if(!this.on){ const t=this.ctx.currentTime; this.harm.forEach(x=>x.g.gain.setTargetAtTime(0,t,0.05)); this.noiseGain.gain.setTargetAtTime(0,t,0.05);
@@ -1014,7 +1168,11 @@ $('mixH').oninput = e=>{ if(Audio.busH) Audio.busH.gain.value=+e.target.value; }
 $('mixV').oninput = e=>{ if(Audio.busV) Audio.busV.gain.value=+e.target.value; };
 $('mixN').oninput = e=>{ if(Audio.busN) Audio.busN.gain.value=+e.target.value; };
 $('mixR').oninput = e=>{ if(Audio.busR) Audio.busR.gain.value=+e.target.value; };
+$('mixG').oninput = e=>{ if(Audio.busG) Audio.busG.gain.value=+e.target.value; };
 $('colorful').onchange = e=>Audio.setColorful(e.target.checked);
+$('grainOn').onchange = e=>{ Audio.init(); Audio.setGrain(e.target.checked); };
+$('grainRate').oninput = e=>{ $('grainRateLbl').textContent = e.target.value; };
+$('grainMs').oninput = e=>{ $('grainMsLbl').textContent = e.target.value; };
 
 // водопад: 64 строки (полосы куба снизу вверх), столбец на кадр, яркость = амплитуда, оттенок = шум
 const WF = { canvas: $('waterfall'), col: 0, w: 240, h: 64, ctx: null, img: null,

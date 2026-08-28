@@ -502,3 +502,144 @@ def test_voice_pitch_updates_are_staggered_not_synchronized(page, server):
 
     page.click("#btnAudio")
     assert not page.evaluate("viewer.Audio.on")
+
+
+def test_granular_sample_is_built_from_genome(page, server):
+    """Сэмпл вида синтезируется ИЗ ГЕНОМА (Audio.grainBuffer) — в этом вся
+    суть режима. Проверяем три вещи, без которых фича — просто шумелка:
+    один и тот же геном даёт побитово тот же сэмпл (детерминизм — иначе
+    тембр вида плавал бы от кадра к кадру), разные геномы дают РАЗНЫЕ
+    сэмплы, и правка гена в лаборатории пересобирает сэмпл."""
+    page.click("#btnAudio")
+    try:
+        # детерминизм: два вызова подряд — один и тот же буфер (из кэша) и
+        # одинаковое содержимое даже после сброса кэша
+        same = page.evaluate("""() => {
+            const A = viewer.Audio;
+            A.grainBufs.clear();
+            const a = A.grainBuffer(1).getChannelData(0).slice(0, 4096);
+            A.grainBufs.clear();
+            const b = A.grainBuffer(1).getChannelData(0).slice(0, 4096);
+            let diff = 0; for (let i=0;i<a.length;i++) diff += Math.abs(a[i]-b[i]);
+            return diff;
+        }""")
+        assert same == 0, same
+
+        # разные виды (мох/хищник — заведомо разные геномы) звучат по-разному
+        diff_species = page.evaluate("""() => {
+            const A = viewer.Audio;
+            const a = A.grainBuffer(1).getChannelData(0);
+            const b = A.grainBuffer(8).getChannelData(0);
+            let d = 0; for (let i=0;i<4096;i++) d += Math.abs(a[i]-b[i]);
+            return d / 4096;
+        }""")
+        assert diff_species > 0.05, diff_species
+
+        # сэмпл не статичен: начало и конец различаются, иначе точка чтения
+        # (глубина клетки по y) была бы не слышна вообще
+        morph = page.evaluate("""() => {
+            const d = viewer.Audio.grainBuffer(1).getChannelData(0);
+            const n = d.length;
+            const rms = (from) => { let s=0; for (let i=from;i<from+4096;i++) s+=d[i]*d[i];
+                                    return Math.sqrt(s/4096); };
+            const head = rms(0), tail = rms(n-8192);
+            return Math.abs(head - tail) / Math.max(head, tail, 1e-9);
+        }""")
+        assert morph > 0.02, morph
+
+        # правка гена -> новый сэмпл (кэш инвалидируется по геному, а не по id)
+        changed = page.evaluate("""() => {
+            const A = viewer.Audio;
+            const a = A.grainBuffer(1).getChannelData(0).slice(0, 4096);
+            const before = viewer.CFG.edited[0][0];
+            viewer.CFG.edited[0][0] = before > 0.5 ? 0.05 : 0.95;
+            const b = A.grainBuffer(1).getChannelData(0).slice(0, 4096);
+            viewer.CFG.edited[0][0] = before;
+            let d = 0; for (let i=0;i<a.length;i++) d += Math.abs(a[i]-b[i]);
+            return d / a.length;
+        }""")
+        assert changed > 0.01, changed
+    finally:
+        page.click("#btnAudio")
+
+
+def test_granular_schedules_grains_only_when_enabled(page, server):
+    """Зёрна реально сыплются, когда режим включён, и не сыплются, когда
+    выключен. Заодно ловим немой чекбокс: без планировщика grainsPlayed
+    остался бы нулевым при любом положении галочки."""
+    page.click("#btnAudio")
+    try:
+        if page.evaluate("viewer.Audio.ctx.state") != "running":
+            pytest.skip("AudioContext не запустился в headless — планировщику не по чему тикать")
+        # выключено — счётчик стоит
+        page.evaluate("viewer.Audio.grainsPlayed = 0; viewer.Audio.setGrain(false)")
+        page.wait_for_timeout(300)
+        assert page.evaluate("viewer.Audio.grainsPlayed") == 0
+
+        page.check("#grainOn")
+        assert page.evaluate("viewer.Audio.grainOn") is True
+        page.wait_for_function("viewer.Audio.grainsPlayed > 0", timeout=5000)
+        played = page.evaluate("viewer.Audio.grainsPlayed")
+        assert played > 0
+
+        # сэмплы собрались только для тех видов, что реально живут в мире
+        live = {s + 1 for s, p in enumerate(page.evaluate("viewer.S.pops")) if p > 0}
+        built = set(page.evaluate("[...viewer.Audio.grainBufs.keys()]"))
+        assert built and built <= live, (built, live)
+
+        # выключили — счётчик перестал расти
+        page.uncheck("#grainOn")
+        page.wait_for_timeout(200)
+        stopped = page.evaluate("viewer.Audio.grainsPlayed")
+        page.wait_for_timeout(400)
+        assert page.evaluate("viewer.Audio.grainsPlayed") == stopped
+    finally:
+        page.evaluate("viewer.Audio.setGrain(false)")
+        page.click("#btnAudio")
+
+
+def test_granular_grain_maps_cell_axes_to_sound(page, server):
+    """Раскладка по осям — то, ради чего клетка вообще становится зерном:
+    x -> панорама, y -> точка чтения сэмпла, z -> высота тона. Подсовываем
+    конкретные клетки и смотрим, что получил узел зерна."""
+    page.click("#btnAudio")
+    try:
+        got = page.evaluate("""() => {
+            const A = viewer.Audio, n = viewer.S.n;
+            const spy = [];
+            const origBuf = A.ctx.createBufferSource.bind(A.ctx);
+            const origPan = A.ctx.createStereoPanner.bind(A.ctx);
+            let last = {};
+            A.ctx.createStereoPanner = () => { const p = origPan(); last.panner = p; return p; };
+            A.ctx.createBufferSource = () => {
+                const s = origBuf();
+                const start = s.start.bind(s);
+                s.start = (when, off, dur) => { last.off = off; last.rate = s.playbackRate.value;
+                                                return start(when, off, dur); };
+                return s;
+            };
+            const buf = A.grainBuffer(1);
+            // подменяем клетки на две крайние — и возвращаем как было, иначе
+            // подделку увидит следующий тест (page/S общие на весь модуль)
+            const keepC = viewer.S.coords, keepS = viewer.S.species;
+            viewer.S.coords = new Uint16Array([0, 0, 0,  n-1, n-1, n-1]);
+            viewer.S.species = new Uint8Array([1, 1]);
+            A.playGrain(buf, 0, 1, A.ctx.currentTime + 0.05, 0.05, 40);
+            const lo = {pan: last.panner.pan.value, off: last.off, rate: last.rate};
+            A.playGrain(buf, 1, 1, A.ctx.currentTime + 0.05, 0.05, 40);
+            const hi = {pan: last.panner.pan.value, off: last.off, rate: last.rate};
+            A.ctx.createBufferSource = origBuf; A.ctx.createStereoPanner = origPan;
+            viewer.S.coords = keepC; viewer.S.species = keepS;
+            return {lo, hi, dur: buf.duration};
+        }""")
+        lo, hi = got["lo"], got["hi"]
+        # x: левый край -> панорама влево, правый -> вправо
+        assert lo["pan"] == pytest.approx(-1, abs=0.05), lo
+        assert hi["pan"] > 0.8, hi
+        # y: глубина куба -> точка чтения сэмпла (в начале vs в конце)
+        assert lo["off"] == pytest.approx(0, abs=1e-6), lo
+        assert hi["off"] > got["dur"] * 0.5, (hi, got["dur"])
+        # z: высота -> высота тона (верхняя клетка звучит выше нижней)
+        assert hi["rate"] > lo["rate"] * 1.5, (lo, hi)
+    finally:
+        page.click("#btnAudio")
