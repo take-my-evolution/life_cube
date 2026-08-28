@@ -28,7 +28,8 @@ class EcologyRules(Rules):
 
     WORLD_PARAMS = ("n", "seed_world", "seed_mut", "seed_density", "animal_share",
                     "stone_fraction", "relief_amp", "p_shock", "p_dissolve",
-                    "plant_energy", "eat_efficiency", "move_noise")
+                    "plant_energy", "eat_efficiency", "move_noise",
+                    "rain_rate", "rain_amount", "rain_decay")
 
     def init_state(self, cfg, xp):
         return _init_state(cfg, xp)

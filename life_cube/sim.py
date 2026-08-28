@@ -23,6 +23,10 @@ def init_state(cfg: Config, xp):
         "genomes": xp.asarray(cfg.genomes),
         # отдельный поток случайности для жизни — не смешивается с сидом мира
         "rng": xp.random.default_rng(cfg.seed_mut),
+        # дождь — свой поток: не сдвигает случайность рождения/движения/охоты
+        # каждый раз, как меняется что-то в дожде (наступали: тесты и повадки
+        # существ дрожали от одного нового rng.random() в общем потоке)
+        "rng_rain": xp.random.default_rng(cfg.seed_mut ^ 0x7a17a170),
         "maxfilter": max_filter_for(xp),
         # поверхность нужна повторному засеву (Rules.seed)
         "relief": relief,

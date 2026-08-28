@@ -25,6 +25,26 @@ def step(state: dict, cfg: Config, xp, correlate, gen: int = 0):
     n_sp = cfg.n_species
     rng = state["rng"]
 
+    # --- дождь: подложка сохнет каждое поколение и пополняется каплями ---
+    # `wet` больше не застывший навсегда узор ниш (см. world.build_world) — он
+    # эволюционирует сам: без дождя (rain_rate=0) высыхает до нуля за
+    # ~ln(0.01)/ln(rain_decay) поколений, и всё, что кормится водой (высокий
+    # ген water — например мох), со временем усыхает вместе с ним. Дождь
+    # регулируется тремя ручками (rain_rate/rain_amount/rain_decay), а не
+    # просто ещё одним фиксированным полем: иначе плотность жизни снова
+    # упёрлась бы в потолок и там и осталась.
+    # Свой поток случайности (не общий `rng`): иначе одно новое
+    # rng.random() здесь сдвигало бы вообще ВСЮ последующую случайность
+    # поколения — кто родился, куда пошёл хищник — заново на каждый чих
+    # ручки дождя (наступали: ловилось только по неожиданно упавшим тестам).
+    rain_rng = state.get("rng_rain")
+    if rain_rng is None:
+        rain_rng = xp.random.default_rng(cfg.seed_mut ^ 0x7a17a170)
+    drop = rain_rng.random(wet.shape) < cfg.rain_rate
+    wet = wet * cfg.rain_decay + xp.where(drop, xp.float32(cfg.rain_amount), xp.float32(0.0))
+    state["wet"] = wet
+    state["rng_rain"] = rain_rng
+
     mobile = cfg.mobile_mask()
     plant_ids = [s for s in range(1, n_sp + 1) if not mobile[s - 1]]
 

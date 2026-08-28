@@ -39,7 +39,12 @@ def _flat_world(n=16, branch=1.0, absorb=0.7, water=0.35):
     """Плоский камень, одна колонна вида 1 высотой 5. Возвращает state."""
     g = np.zeros((1, 14), np.float32)
     g[0, :6] = [absorb, 1.5, 1.75, 0.40, water, branch]
-    cfg = Config(n=n, genomes=g, p_shock=0, p_dissolve=0, p_mutate=0, seed_density=0.01)
+    # rain_rate=0: тест держит вручную заданную вечно-неизменную wet=1
+    # (проверяет геометрию ветвления/связности, а не дождь) — иначе дождь
+    # чуть плывёт значения ресурса, и ровно на границе тай-брейка рождения
+    # может проскочить лишняя клетка не там, где тест её ждёт
+    cfg = Config(n=n, genomes=g, p_shock=0, p_dissolve=0, p_mutate=0, seed_density=0.01,
+                 rain_rate=0.0, rain_decay=1.0)
     xp, corr, _ = get_backend(False)
     state, _ = init_state(cfg, xp)
     stone = np.zeros((n, n, n), bool); stone[:, :, :3] = True

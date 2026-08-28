@@ -42,8 +42,14 @@ def test_plant_step_matches_legacy():
     # тот же геном в новом формате: первые пять чисел совпадают, branch = 0
     g = np.zeros((4, len(GENOME_FIELDS)), np.float32)
     g[:, :5] = lcfg.genomes
+    # дождь — новая механика (влажность подложки сохнет/льётся), которой у
+    # legacy-монолита нет вообще: он держит статичный wet вечно. Отключаем
+    # (rain_rate=0, rain_decay=1.0 -> wet не меняется), иначе сравнение
+    # физики растений разъедет уже на первом поколении не из-за регрессии,
+    # а из-за заведомо новой, отдельно протестированной механики.
     cfg = Config(n=n, gens=gens, seed_density=0.02, genomes=g,
-                 lateral_decay=0.0, animal_share=0.0, require_substrate=False)
+                 lateral_decay=0.0, animal_share=0.0, require_substrate=False,
+                 rain_rate=0.0, rain_decay=1.0)
     xp, corr, _ = get_backend(False)
     state, _ = init_state(cfg, xp)
     state.update({"species": species.copy(), "stone": stone.copy(),
