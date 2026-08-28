@@ -139,12 +139,27 @@ def test_top_view_scales_with_population(page, server):
 def test_select_organism(page, server):
     comps = server["engine"].last_snapshot.components
     big = comps[0]
-    page.evaluate(f"viewer.set('ghost', false); viewer.set('showStone', false); viewer.set('selected', {big.cid})")
+    # клиент узнаёт organism.cid из S.comps не мгновенно — приходит с
+    # ближайшим тяжёлым пересчётом организмов (components_hz), а не с каждым
+    # кадром. Ждём явно, а не надеемся на побочный тайминг соседних тестов
+    # (раньше без этого падал при запуске в изоляции, pytest -k).
+    page.wait_for_function(f"viewer.S.comps.some(c => c[0] === {big.cid})", timeout=5000)
+    # showSoil/showWater — тоже false: почва и вода — не растения/животные,
+    # у них нет aLabel, и их фиксированный цвет террейна на этом (случайном
+    # по seed) мире по хешу гистограммы иногда попадает в тот же "ближайший
+    # по оттенку" бакет, что и цвет какого-то вида — иначе тест изредка ловил
+    # цветные пиксели ПОЧВЫ/ВОДЫ как ложных "не тех" организмов, никак не
+    # связанных с фильтром по selected. showStone уже был здесь по той же
+    # причине — теперь убираем оставшуюся подложку целиком, а не только камень.
+    page.evaluate(f"viewer.set('ghost', false); viewer.set('showStone', false);"
+                  f" viewer.set('showSoil', false); viewer.set('showWater', false);"
+                  f" viewer.set('selected', {big.cid})")
     h = hist(page)
     key = f"s{big.species}"
     others = sum(h[f"s{s}"] for s in (1, 2, 3, 4, 5) if s != big.species)
     assert h[key] > 0 and others < 30, h
-    page.evaluate("viewer.set('selected', 0); viewer.set('showStone', true)")
+    page.evaluate("viewer.set('selected', 0); viewer.set('showStone', true);"
+                  " viewer.set('showSoil', true); viewer.set('showWater', true)")
 
 
 def test_controls_reach_engine(page, server):
