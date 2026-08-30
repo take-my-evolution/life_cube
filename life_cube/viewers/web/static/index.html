@@ -131,6 +131,15 @@
   <div class="row muted">длина зерна <b id="grainMsLbl">70</b> мс
     <input id="grainMs" type="range" style="width:70px" min="15" max="220" step="5" value="70"></div>
   <div class="row muted">микс гранул <input id="mixG" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.7"></div>
+  <div class="row"><label class="sp"><input type="checkbox" id="noteOn"> Ноты (ADSR-секвенсор)</label></div>
+  <div class="row muted" id="noteHint">вместо дрона — отдельные ноты по сетке. Ритм вида — евклидов рисунок по его
+    доле в населении; <b>атака</b> — от роста популяции (взрывной рост бьёт резко, угасающий вид вплывает мягко),
+    <b>спад и сустейн</b> — от обмена веществ, <b>релиз</b> — от долголетия и вымирания</div>
+  <div class="row muted">темп <b id="bpmLbl">96</b>
+    <input id="bpm" type="range" style="width:70px" min="40" max="200" step="2" value="96"></div>
+  <div class="row muted">шагов в такте <b id="stepsLbl">16</b>
+    <input id="steps" type="range" style="width:70px" min="4" max="32" step="4" value="16"></div>
+  <div class="row muted">микс нот <input id="mixNo" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.8"></div>
   <canvas id="waterfall" title="спектр-водопад: 64 полосы куба снизу вверх, время слева направо"></canvas>
 
   <h3>Геном</h3>
@@ -845,6 +854,10 @@ const Audio = {
   // гранулы: своя шина, кэш сэмплов по виду и счётчик сыгранных зёрен
   grainOn: false, grainBufs: new Map(), grainsPlayed: 0, busG: null, sendG: null,
   hannCurve: null, _grainTimer: null, _grainNext: 0, GRAIN_REF_HZ: 110,
+  // ноты: ADSR-секвенсор (своя шина, кэш волновых форм, счётчик нот)
+  noteOn: false, noteWaves: new Map(), notesPlayed: 0, busNo: null, sendNo: null,
+  noiseBuf: null, _noteTimer: null, _noteNext: 0, _noteStep: 0,
+  _popEma: null, _growth: null, _spread: null,
   PENTA: [0, 3, 5, 7, 10, 12, 15, 17, 19, 22],
   // детерминированный сдвиг в центах по id вида — не аудио-рандом каждый
   // кадр, а стабильная "окраска" вида, чтобы он всегда звучал одинаково
@@ -926,6 +939,12 @@ const Audio = {
     this.sendG = ctx.createGain(); this.sendG.gain.value = 0;
     this.busG.connect(this.sendG); this.sendG.connect(this.reverb);
     this.hannCurve = this.hann(64);
+    // ноты: своя шина, свой посыл в реверб и общий буфер шума для придыхания
+    this.busNo = ctx.createGain(); this.busNo.gain.value = +$('mixNo').value;
+    this.busNo.connect(this.master);
+    this.sendNo = ctx.createGain(); this.sendNo.gain.value = 0;
+    this.busNo.connect(this.sendNo); this.sendNo.connect(this.reverb);
+    this.noiseBuf = buf;
   },
   setColorful(on){
     this.colorful = on;
@@ -935,6 +954,7 @@ const Audio = {
     this.sendH.gain.setTargetAtTime(hAmt, t, 0.3); this.sendH._amt = hAmt;
     this.sendV.gain.setTargetAtTime(vAmt, t, 0.3); this.sendV._amt = vAmt;
     if (this.sendG) this.sendG.gain.setTargetAtTime(on ? 0.30 : 0, t, 0.3);
+    if (this.sendNo) this.sendNo.gain.setTargetAtTime(on ? 0.35 : 0, t, 0.3);
     if (!on){
       // возвращаем полосы на плоский целочисленный ряд и глушим хоровые голоса
       this.harm.forEach((x,i)=>{ const f=this.baseHz*(i+1); x.o.frequency.setTargetAtTime(f,t,0.3); x._f=f; });
@@ -948,7 +968,12 @@ const Audio = {
       if (v.o2) v.o2.frequency.setTargetAtTime(hz*v.h*Math.pow(2, this.speciesDetune(v.sp)/1200), t, 0.05);
     } },
   apply(sf){
-    this.frame = sf; if (!this.ctx || !this.on || !sf) return;
+    this.frame = sf;
+    // рост популяций пишем всегда, даже с выключенным звуком: включив ноты,
+    // мы должны сразу знать, кто растёт, а кто вымирает, а не копить историю
+    // заново с нуля
+    this.trackPops();
+    if (!this.ctx || !this.on || !sf) return;
     // основной тон приходит из мира (его считает SoundMapper по населению)
     if (S.autoHz && sf.base_hz && Math.abs(sf.base_hz - this.baseHz) > 0.05){
       this.setBase(sf.base_hz); $('hzLbl').textContent = sf.base_hz.toFixed(1)+' Гц';
@@ -1043,44 +1068,143 @@ const Audio = {
     return CFG.edited[sp-1] || null;
   },
   genomeKey(sp){ const r=this.genomeRow(sp); return r ? sp+':'+r.map(v=>(+v).toFixed(3)).join(',') : null; },
-  // Сэмпл вида из его генома. Главное требование: сэмпл НЕ должен быть
-  // статичным — спектр морфирует от «первой половины генов» к «второй» по
-  // ходу сэмпла, иначе точка чтения (y клетки) была бы не слышна вообще и
-  // всё выродилось бы в один неподвижный аккорд. Всё детерминировано (фазы
-  // и шум — не Math.random): один и тот же геном обязан давать один и тот
-  // же тембр, иначе это ни услышать осознанно, ни проверить тестом.
+  // геном вида, нормированный в 0..1 по диапазонам генов: движки разные, и
+  // абсолютные величины несравнимы (repro бывает до 12, absorb до 1)
+  genomeNorm(sp){
+    const row=this.genomeRow(sp); if (!row) return null;
+    const f=CFG.data.fields, R=CFG.data.ranges||{};
+    return row.map((v,gi)=>{ const r=R[f[gi]]||[0,1];
+      return r[1]>r[0] ? Math.min(1, Math.max(0, (v-r[0])/(r[1]-r[0]))) : 0; });
+  },
+  // ---------------------------------------------------- тембр из генома
+  // Проекция генома на ось тембра: у каждой оси СВОЙ знаковый вектор весов
+  // ПО ВСЕМ генам, результат сжимается логистикой в 0..1.
+  //
+  // Почему именно так, а не «ген №7 — это шум»: раньше отдельные оси брались
+  // из фиксированных индексов, и у всех шести растений «экологии» гены 6..13
+  // нулевые (hunt/trophic/speed/sense/metabolism/repro/lifespan/armor — это
+  // всё про животных). В результате шум у них совпадал до знака (0.050) и
+  // негармоничность тоже (0.0040) — различались только веса обертонов под
+  // фиксированным спадом 1/k. Отсюда и было «все виды звучат одинаково»:
+  // растения составляют почти весь мир, а они были почти клонами.
+  // Со знаковой проекцией по всему геному ЛЮБОЕ отличие в любом гене
+  // сдвигает все оси сразу, и вырожденных случаев не остаётся.
+  geneProj(z, axis){
+    let s=0;
+    for (let i=0;i<z.length;i++){
+      const h=Math.sin((i+1)*12.9898 + axis*7.13)*43758.5453;
+      s += ((h-Math.floor(h))*2-1) * z[i];
+    }
+    return 1/(1+Math.exp(-1.15*s/Math.sqrt(Math.max(1,z.length))));
+  },
+  // Разброс каждого гена ПО ВСЕМ видам этого мира. Нужен, чтобы мерить вид
+  // не в абсолютных величинах, а в отклонениях от «среднего вида»:
+  // ген, одинаковый у всех (у растений «экологии» это все восемь звериных
+  // генов), не должен влиять на тембр вообще, а ген, по которому виды реально
+  // расходятся, должен влиять сильно. Без этого шесть растений отличались в
+  // шести генах из четырнадцати, отличия размазывались по всем осям и виды
+  // сходились в один тембр — ровно то, на что пожаловались.
+  // Побочный эффект приятный: у движков с эволюцией (лишайник/терра) палитра
+  // тембров сама раздвигается по мере того, как виды расходятся генетически.
+  genomeSpread(){
+    const rows = CFG.edited; if (!rows || !rows.length) return null;
+    const key = rows.length + ':' + rows.map(r=>r.map(v=>(+v).toFixed(3)).join(',')).join('|');
+    if (this._spread && this._spread.key === key) return this._spread;
+    const f=CFG.data.fields, R=CFG.data.ranges||{}, m=rows[0].length;
+    const norm = rows.map(row => row.map((v,gi)=>{ const r=R[f[gi]]||[0,1];
+      return r[1]>r[0] ? Math.min(1, Math.max(0, (v-r[0])/(r[1]-r[0]))) : 0; }));
+    const mean=new Array(m).fill(0), sd=new Array(m).fill(0);
+    for (const row of norm) for (let i=0;i<m;i++) mean[i]+=row[i]/norm.length;
+    for (const row of norm) for (let i=0;i<m;i++) sd[i]+=Math.pow(row[i]-mean[i],2)/norm.length;
+    for (let i=0;i<m;i++) sd[i]=Math.sqrt(sd[i]);
+    this._spread = {key, mean, sd};
+    return this._spread;
+  },
+  // геном вида в «отклонениях от среднего вида» (z-оценки)
+  genomeZ(sp){
+    const G=this.genomeNorm(sp), st=this.genomeSpread();
+    if (!G || !st) return null;
+    // порог на sd: у гена, который у всех одинаков, отклонение нулевое и
+    // делить на него нельзя; заодно шум в третьем знаке не превращается в ось
+    return G.map((v,i)=> (v-st.mean[i]) / Math.max(st.sd[i], 0.04));
+  },
+  // Набор перцептивно РАЗНЫХ осей тембра. Каждая — та ось, по которой ухо
+  // реально различает звуки: наклон спектра (яркость), баланс чётных и
+  // нечётных обертонов (полый кларнет против полного пилообразного),
+  // негармоничность (колокол/металл против тона), шум (придыхание),
+  // форманта (гласный призвук), морфинг вдоль сэмпла и внутренняя пульсация.
+  grainTimbre(sp){
+    const z = this.genomeZ(sp); if (!z) return null;
+    // растягиваем проекции от середины: логистика жмёт их к 0.5, а нам нужен
+    // слышимый разброс, а не шесть оттенков одного тембра
+    const P = a => Math.min(1, Math.max(0, (this.geneProj(z, a) - 0.5)*1.9 + 0.5));
+    return {
+      tilt:   0.30 + 2.30*P(1),                  // спад обертонов: 0.3 звонко … 2.6 глухо
+      odd:    0.10 + 0.90*P(2),                  // вес чётных обертонов
+      inh:    0.0002 + 0.011*Math.pow(P(3),2),   // негармоничность (колокольность)
+      nz:     0.02 + 0.55*Math.pow(P(4),1.7),    // доля шума
+      fPos:   1.0 + 8.0*P(5),                    // номер «формантного» обертона
+      fAmt:   0.3 + 5.5*P(6),                    // сила форманты
+      morph:  0.20 + 0.80*P(7),                  // насколько спектр едет вдоль сэмпла
+      tremHz: 0.4 + 12.0*P(8),                   // внутренняя пульсация, Гц
+      tremD:  0.55*P(9),
+    };
+  },
+  // Сэмпл вида. Требование, ради которого всё затевалось: сэмпл НЕ должен
+  // быть статичным — тембр едет вдоль сэмпла (ось morph), иначе точка чтения
+  // (y клетки) была бы не слышна и всё выродилось бы в неподвижный аккорд.
+  // Всё детерминировано (фазы и шум — не Math.random): один и тот же геном
+  // обязан давать один и тот же тембр, иначе это ни услышать осознанно, ни
+  // проверить тестом.
   grainBuffer(sp){
     if (!this.ctx) return null;
     const key = this.genomeKey(sp); if (!key) return null;
     const hit = this.grainBufs.get(sp);
     if (hit && hit.key === key) return hit.buf;
-    const row = this.genomeRow(sp), f = CFG.data.fields;
-    // каждый ген нормируем в 0..1 по его же диапазону: движки разные, и
-    // абсолютные величины несравнимы (repro бывает до 12, absorb до 1)
-    const G = row.map((v,gi)=>{ const r=(CFG.data.ranges||{})[f[gi]]||[0,1];
-      return r[1]>r[0] ? Math.min(1, Math.max(0, (v-r[0])/(r[1]-r[0]))) : 0; });
-    const m = G.length; if (!m) return null;
+    const T = this.grainTimbre(sp); if (!T) return null;
     const ctx=this.ctx, sr=ctx.sampleRate, L=Math.floor(sr*0.6);
     const buf = ctx.createBuffer(1, L, sr), d = buf.getChannelData(0);
-    const NH = 12, half = Math.max(1, m>>1);
-    const mean = G.reduce((a,b)=>a+b,0)/m;
-    const inh = 0.004 + 0.020*(G[m-1] ?? mean);   // негармоничность обертонов
-    const nz  = 0.05  + 0.35 *(G[m>>1]  ?? mean); // доля шума
-    const w = 2*Math.PI*this.GRAIN_REF_HZ/sr;
-    const ph=[]; for(let k=0;k<NH;k++){ const x=Math.sin((k+1)*12.9898)*43758.5453; ph.push((x-Math.floor(x))*2*Math.PI); }
-    let peak=1e-6, seed=(m*2654435761)>>>0 || 1;
-    for (let i=0;i<L;i++){
-      const u = i/L;                     // 0..1 — «время» внутри сэмпла
-      let s = 0;
+    const NH = 16, SEG = 48;
+    // Веса обертонов считаем не на каждый сэмпл (это 16 pow() на отсчёт —
+    // десятки мс на буфер), а на SEG опорных точек с линейной интерполяцией
+    // между ними: слышимо то же самое, стоит в сотни раз дешевле.
+    const A = [];
+    for (let s0=0; s0<=SEG; s0++){
+      const u=s0/SEG, row=new Float32Array(NH);
+      const tilt = T.tilt * (1 - T.morph*0.45 + T.morph*0.90*u);   // ярче/глуше вдоль сэмпла
+      const fp   = T.fPos * (1 + T.morph*(u-0.5));                 // форманта едет
       for (let k=0;k<NH;k++){
-        const a0=G[k%m], a1=G[(k+half)%m];
-        s += ((a0 + (a1-a0)*u) / (k+1)) * Math.sin(w*(k+1)*(1+inh*k)*i + ph[k]);
+        const kk=k+1;
+        let a = Math.pow(kk, -tilt);
+        if (kk % 2 === 0) a *= T.odd;
+        a *= 1 + T.fAmt*Math.exp(-Math.pow((kk-fp)/1.3, 2));       // формантный горб
+        row[k]=a;
       }
-      seed = (seed*1664525 + 1013904223) >>> 0;   // детерминированный «шум»
-      s += nz * ((seed/4294967296)*2-1) * (0.3+0.7*u);
-      d[i]=s; const a=Math.abs(s); if (a>peak) peak=a;
+      A.push(row);
     }
-    for (let i=0;i<L;i++) d[i] /= peak;           // виды одинаково громкие
+    const w = 2*Math.PI*this.GRAIN_REF_HZ/sr;
+    const ph=[], fk=[];
+    for (let k=0;k<NH;k++){
+      const x=Math.sin((k+1)*12.9898)*43758.5453; ph.push((x-Math.floor(x))*2*Math.PI);
+      // «жёсткая струна»: обертоны разъезжаются вверх — это и есть металл/колокол
+      fk.push((k+1)*Math.sqrt(1 + T.inh*(k+1)*(k+1)));
+    }
+    let seed=((sp*2654435761)>>>0) || 1, sum2=0, peak=1e-6;
+    for (let i=0;i<L;i++){
+      const u=i/L, g=u*SEG, s0=Math.min(SEG-1, g|0), fr=g-s0;
+      const a0=A[s0], a1=A[s0+1];
+      let s=0;
+      for (let k=0;k<NH;k++) s += (a0[k] + (a1[k]-a0[k])*fr) * Math.sin(w*fk[k]*i + ph[k]);
+      seed = (seed*1664525 + 1013904223) >>> 0;   // детерминированный «шум»
+      s += T.nz * ((seed/4294967296)*2-1);
+      s *= 1 + T.tremD*Math.sin(2*Math.PI*T.tremHz*i/sr);
+      d[i]=s; sum2+=s*s; const ab=Math.abs(s); if (ab>peak) peak=ab;
+    }
+    // нормируем по RMS (воспринимаемая громкость), а не по пику: иначе один
+    // случайный выброс делал бы весь сэмпл тише остальных
+    const rms=Math.sqrt(sum2/L) || 1;
+    const gain=Math.min(0.28/rms, 0.95/peak);
+    for (let i=0;i<L;i++) d[i] *= gain;
     this.grainBufs.set(sp, {key, buf});
     return buf;
   },
@@ -1131,16 +1255,17 @@ const Audio = {
     when = Math.max(when, ctx.currentTime);   // setValueCurveAtTime в прошлое бросает
     const x=S.coords[i*3], y=S.coords[i*3+1], z=S.coords[i*3+2];
     const src=ctx.createBufferSource(); src.buffer=buf;
-    // Высота: ступень пентатоники по виду В ПРЕДЕЛАХ ОКТАВЫ (%12) + октава
-    // по высоте клетки. Полная пентатоника PENTA доходит до 22 полутонов —
-    // почти две октавы; вместе с высотой это давало разброс под пять октав,
-    // и верхние зёрна улетали в свист. Плюс жёсткий кламп rate: на краях
-    // (верх куба + дальний вид + высокий базовый тон) он доходил до ~19x —
-    // обертоны за Найквистом и зерно длиной 4 мс, то есть еле слышный
-    // щелчок вместо ноты.
-    const deg = this.PENTA[(sp-1) % this.PENTA.length] % 12;
+    // Высота: ступень пентатоники по виду + октава по высоте клетки.
+    // Ступень берётся из ПОЛНОЙ пентатоники, а не свёрнутой в октаву (%12):
+    // при свёртке десять ступеней PENTA давали всего пять классов высоты, и
+    // виды 1 и 6, 2 и 7, 3 и 8 звучали ровно на одной ноте — прямой вклад в
+    // «все виды звучат одинаково». Кламп rate остаётся (на краях он доходил
+    // до ~19x: обертоны за Найквистом и зерно в 4 мс вместо ноты), но
+    // потолок поднят до 6 — 110 Гц × 6 = 660 Гц, 16-й обертон ещё под
+    // Найквистом.
+    const deg = this.PENTA[(sp-1) % this.PENTA.length];
     const oct = Math.round(z/n*2) - 1;
-    const rate = Math.min(4, Math.max(0.25,
+    const rate = Math.min(6, Math.max(0.25,
       Math.pow(2, oct + deg/12 + this.speciesDetune(sp)/1200) * (this.baseHz/55)));
     src.playbackRate.value = rate;
     // ВАЖНО: третий аргумент start() — длительность во ВРЕМЕНИ БУФЕРА, а не
@@ -1166,6 +1291,188 @@ const Audio = {
     src.onended = ()=>{ try{ src.disconnect(); g.disconnect(); p.disconnect(); }catch(e){} };
     this.grainsPlayed++;
   },
+  // ------------------------------------------- ноты: ADSR-секвенсор
+  // Гранулы по построению дают ДРОН: облако перекрывающихся зёрен без начал
+  // и концов, в котором тембр вида к тому же маскируется соседями. Здесь
+  // наоборот — отдельные ноты по сетке, у каждой своя ADSR-огибающая, и
+  // форма этой огибающей берётся ИЗ СИМУЛЯЦИИ, отдельно на каждый вид:
+  //
+  //   атака   ← рост популяции: взрывной рост бьёт резко (пинг), угасающий
+  //             вид вплывает мягким свеллом;
+  //   спад +  ← обмен веществ (ген metabolism, где он есть): кто быстро жжёт
+  //   сустейн   энергию — щипок с коротким хвостом, кто медленно — пад;
+  //   релиз   ← долголетие плюс вымирание: гибнущий вид звенит дольше всех.
+  //
+  // Ритм вида — евклидов рисунок E(k,n), где k задаётся долей вида в
+  // населении: доминирующий вид бьёт часто, редкий — изредка. Евклидовы
+  // рисунки — те самые, на которых стоит половина мировой ритмики, поэтому
+  // сетка звучит музыкально, а не как метроном, и меняется вместе с экологией.
+  //
+  // Источник тона — НЕ зацикленный сэмпл (шов зацикливания щёлкает), а
+  // PeriodicWave, собранная из того же спектра grainTimbre: тембр вида тот
+  // же самый, что в гранулах, но идеально периодичный для длинной ноты.
+  noteWave(sp){
+    const key=this.genomeKey(sp); if (!key) return null;
+    const hit=this.noteWaves.get(sp);
+    if (hit && hit.key===key) return hit;
+    const T=this.grainTimbre(sp); if (!T) return null;
+    const NH=16, real=new Float32Array(NH+1), imag=new Float32Array(NH+1);
+    for (let k=0;k<NH;k++){
+      const kk=k+1;
+      let a=Math.pow(kk,-T.tilt);
+      if (kk%2===0) a*=T.odd;
+      a *= 1 + T.fAmt*Math.exp(-Math.pow((kk-T.fPos)/1.3,2));
+      imag[kk]=a;
+    }
+    const wave=this.ctx.createPeriodicWave(real, imag, {disableNormalization:false});
+    const rec={key, wave, T};
+    this.noteWaves.set(sp, rec);
+    return rec;
+  },
+  // Рост популяции вида: сглаженная относительная скорость -1..+1.
+  // Считается на каждом звуковом кадре из S.pops — это и есть «что с видом
+  // происходит прямо сейчас», то, чем управляется атака и релиз.
+  trackPops(){
+    const p=S.pops||[];
+    if (!this._popEma || this._popEma.length!==p.length){
+      this._popEma=p.slice(); this._growth=new Array(p.length).fill(0); return;
+    }
+    for (let i=0;i<p.length;i++){
+      const prev=this._popEma[i];
+      const d=(p[i]-prev)/Math.max(prev,8);
+      this._growth[i]=this._growth[i]*0.8 + Math.max(-1,Math.min(1,d))*0.2;
+      this._popEma[i]=prev*0.85 + p[i]*0.15;
+    }
+  },
+  growth(sp){ return (this._growth && this._growth[sp-1]) || 0; },
+  // ADSR вида: медленная часть — из генома («характер вида»), быстрая — из
+  // текущего состояния популяции («что с ним происходит сейчас»)
+  // Именованный ген, СМЕШАННЫЙ с проекцией генома. Брать только ген по имени
+  // нельзя — это ровно та ловушка, из-за которой «все виды звучали
+  // одинаково»: у шести растений «экологии» metabolism и lifespan нулевые,
+  // и ADSR у них совпадал бы до знака. Проекция (z-оценки по всему геному)
+  // различает виды всегда, именованный ген добавляет смысл там, где движок
+  // такой ген знает.
+  geneMix(sp, name, axis){
+    const proj = (()=>{ const z=this.genomeZ(sp); return z ? this.geneProj(z, axis) : 0.5; })();
+    const f=(CFG.data && CFG.data.fields) || [], i=f.indexOf(name);
+    if (i < 0) return proj;
+    const G=this.genomeNorm(sp); if (!G) return proj;
+    return 0.55*proj + 0.45*G[i];
+  },
+  speciesADSR(sp){
+    const b    = this.geneMix(sp, 'metabolism', 11);   // как быстро жжёт энергию
+    const life = this.geneMix(sp, 'lifespan',   12);   // долголетие
+    const att  = this.geneMix(sp, 'repro',      13);   // «резкость» вида по геному
+    const gr = this.growth(sp);
+    // рост популяции модулирует ГЕНОМНУЮ атаку, а не заменяет её: иначе в
+    // устоявшемся мире (рост у всех ≈ 0) атака у всех видов совпадала бы
+    const rise = Math.min(1, Math.max(-1, gr*6));      // -1 вымирает … +1 взрыв
+    const aBase = 0.005 + 0.34*(1-att);
+    return {
+      a: Math.max(0.003, aBase * (1 - 0.75*rise)),  // растёт — резче, угасает — свеллом
+      d: 0.04 + 0.45*(1-b),                         // быстрый обмен — короткий спад
+      s: 0.05 + 0.70*(1-b),                         // и низкий сустейн
+      r: 0.08 + 1.10*life + 1.60*Math.max(0,-gr),   // гибнущий звенит дольше всех
+    };
+  },
+  // евклидов рисунок: есть ли удар на шаге i в E(k,n)
+  euclid(k, n, i){
+    if (k<=0) return false;
+    if (k>=n) return true;
+    return ((i*k) % n) < k;
+  },
+  setNotes(on){
+    this.noteOn = on;
+    if (!this.ctx) return;
+    if (this.sendNo) this.sendNo.gain.setTargetAtTime(this.colorful ? 0.35 : 0, this.ctx.currentTime, 0.3);
+    if (on){
+      this._noteNext = this.ctx.currentTime + 0.05; this._noteStep = 0;
+      if (!this._noteTimer) this._noteTimer = setInterval(()=>this.noteTick(), 40);
+    } else if (this._noteTimer){ clearInterval(this._noteTimer); this._noteTimer=null; }
+  },
+  noteTick(){
+    if (!this.noteOn || !this.on || !this.ctx || !S.pops) return;
+    const ctx=this.ctx, now=ctx.currentTime, AHEAD=0.18;
+    if (this._noteNext < now) this._noteNext = now;
+    if (this._noteNext - now > 0.6) return;      // контекст на паузе — не копим
+    const bpm=+$('bpm').value, steps=+$('steps').value;
+    const stepSec = 60/Math.max(bpm,1)/4;        // шестнадцатые
+    const pops=S.pops||[], total=pops.reduce((a,b)=>a+b,0);
+    if (total<=0) { this._noteNext = now + stepSec; return; }
+    // до шести голосов: крупнейшие виды
+    const order=pops.map((p,i)=>[p,i+1]).filter(x=>x[0]>0).sort((a,b)=>b[0]-a[0]).slice(0,6);
+    let guard=0;
+    while (this._noteNext < now + AHEAD && guard++ < 32){
+      const step=this._noteStep % steps;
+      for (const [pop, sp] of order){
+        const share=pop/total;
+        // доля в населении -> сколько ударов на такт (евклидов рисунок)
+        const k=Math.max(1, Math.min(steps, Math.round(1 + share*(steps-1)*0.8)));
+        // поворот рисунка по виду: иначе все виды бьют в одну и ту же долю
+        const rot=(sp*3) % steps;
+        if (!this.euclid(k, steps, (step+rot) % steps)) continue;
+        this.playNote(sp, this._noteNext, stepSec, share);
+      }
+      this._noteNext += stepSec;
+      this._noteStep++;
+    }
+  },
+  playNote(sp, when, stepSec, share){
+    const ctx=this.ctx, rec=this.noteWave(sp); if (!rec) return;
+    when=Math.max(when, ctx.currentTime);
+    const T=rec.T, env=this.speciesADSR(sp);
+    // высота: та же пентатоника, что у гранул (виды складываются в аккорд),
+    // октава — по средней высоте вида в кубе
+    const deg=this.PENTA[(sp-1) % this.PENTA.length];
+    const oct=Math.round(this.meanHeight(sp)*2)-1;
+    const f=this.baseHz*Math.pow(2, 1 + oct + deg/12 + this.speciesDetune(sp)/1200);
+    const o=ctx.createOscillator(); o.setPeriodicWave(rec.wave); o.frequency.value=f;
+    // второй осциллятор, расстроенный по негармоничности — от него биения и
+    // «металл» у видов с высоким inh; у тональных видов расстройка около нуля
+    const o2=ctx.createOscillator(); o2.setPeriodicWave(rec.wave);
+    o2.frequency.value=f; o2.detune.value=T.inh*2600;
+    const g=ctx.createGain(), g2=ctx.createGain();
+    g.gain.value=0; g2.gain.value=0.35;
+    const p=ctx.createStereoPanner();
+    p.pan.value=Math.max(-1,Math.min(1, (sp%2?1:-1)*0.15*((sp%5)+1)));
+    o.connect(g); o2.connect(g2); g2.connect(g); g.connect(p); p.connect(this.busNo);
+    const lvl=Math.min(0.5, 0.10 + 0.45*Math.sqrt(share));
+    // держим ноту, пока не пора отпускать; хвост релиза свободно уходит за
+    // границу шага — именно это отличает секвенсор от строчки метронома
+    const hold=Math.max(env.a+env.d+0.01, stepSec*(0.5+0.8*share));
+    g.gain.setValueAtTime(0, when);
+    g.gain.linearRampToValueAtTime(lvl, when+env.a);
+    g.gain.linearRampToValueAtTime(lvl*env.s, when+env.a+env.d);
+    g.gain.setValueAtTime(lvl*env.s, when+hold);
+    g.gain.linearRampToValueAtTime(0, when+hold+env.r);
+    // придыхание на атаке: короткий шумовой всплеск по шумности тембра —
+    // без него нота звучит как чистый синтезаторный тон без «инструмента»
+    if (T.nz > 0.05 && this.noiseBuf){
+      const ns=ctx.createBufferSource(); ns.buffer=this.noiseBuf;
+      const nf=ctx.createBiquadFilter(); nf.type='bandpass'; nf.frequency.value=f*3; nf.Q.value=1.2;
+      const ng=ctx.createGain(); ng.gain.setValueAtTime(0, when);
+      ng.gain.linearRampToValueAtTime(lvl*T.nz*0.9, when+0.004);
+      ng.gain.exponentialRampToValueAtTime(0.0001, when+0.02+0.10*T.nz);
+      ns.connect(nf); nf.connect(ng); ng.connect(p);
+      ns.start(when, Math.random()*1.5, 0.2);
+      ns.onended=()=>{ try{ns.disconnect(); nf.disconnect(); ng.disconnect();}catch(e){} };
+    }
+    const end=when+hold+env.r+0.02;
+    o.start(when); o2.start(when); o.stop(end); o2.stop(end);
+    o.onended=()=>{ try{o.disconnect(); o2.disconnect(); g.disconnect(); g2.disconnect(); p.disconnect();}catch(e){} };
+    this.notesPlayed++;
+  },
+  // средняя высота вида в кубе, 0..1 — октава ноты. Считаем по подвыборке
+  // клеток: полный проход по сотне тысяч на каждый шаг сетки не нужен
+  meanHeight(sp){
+    if (!S.coords || !S.species || !S.k) return 0.5;
+    const k=Math.min(S.k, S.species.length, (S.coords.length/3)|0);
+    const n=Math.max(S.n,1); let sum=0, cnt=0;
+    const stride=Math.max(1, (k/1500)|0);
+    for (let i=0;i<k;i+=stride){ if (S.species[i]===sp){ sum+=S.coords[i*3+2]; cnt++; } }
+    return cnt ? Math.min(1, sum/cnt/n) : 0.5;
+  },
   toggle(){
     this.init(); if (this.ctx.state==='suspended') this.ctx.resume();
     this.on=!this.on; if(!this.on){ const t=this.ctx.currentTime; this.harm.forEach(x=>x.g.gain.setTargetAtTime(0,t,0.05)); this.noiseGain.gain.setTargetAtTime(0,t,0.05);
@@ -1188,6 +1495,10 @@ $('colorful').onchange = e=>Audio.setColorful(e.target.checked);
 $('grainOn').onchange = e=>{ Audio.init(); Audio.setGrain(e.target.checked); };
 $('grainRate').oninput = e=>{ $('grainRateLbl').textContent = e.target.value; };
 $('grainMs').oninput = e=>{ $('grainMsLbl').textContent = e.target.value; };
+$('mixNo').oninput = e=>{ if(Audio.busNo) Audio.busNo.gain.value=+e.target.value; };
+$('noteOn').onchange = e=>{ Audio.init(); Audio.setNotes(e.target.checked); };
+$('bpm').oninput = e=>{ $('bpmLbl').textContent = e.target.value; };
+$('steps').oninput = e=>{ $('stepsLbl').textContent = e.target.value; };
 
 // водопад: 64 строки (полосы куба снизу вверх), столбец на кадр, яркость = амплитуда, оттенок = шум
 const WF = { canvas: $('waterfall'), col: 0, w: 240, h: 64, ctx: null, img: null,

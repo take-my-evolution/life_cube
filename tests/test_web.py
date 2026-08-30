@@ -710,3 +710,187 @@ def test_granular_bus_is_actually_audible_and_faders_move_it(page, server):
         }""")
         page.uncheck("#grainOn")
         page.click("#btnAudio")
+
+
+# признаки тембра, замеренные ИЗ ЗВУКА (не из параметров): спектр по
+# гармоникам опорных 110 Гц, центроид, баланс чётных/нечётных, шумность
+# (энергия вне гармоник) и глубина пульсации огибающей
+_TIMBRE_FEATURES_JS = """() => {
+  const A=viewer.Audio, sr=A.ctx.sampleRate, NH=16, out=[];
+  for (let sp=1; sp<=8; sp++){
+    const b=A.grainBuffer(sp), d=b.getChannelData(0);
+    const N=8192, off=(d.length/3)|0;
+    const mag=[];
+    for(let k=1;k<=NH;k++){
+      const w=2*Math.PI*110*k/sr; let re=0,im=0;
+      for(let i=0;i<N;i++){ const v=d[off+i]; re+=v*Math.cos(w*i); im+=v*Math.sin(w*i); }
+      mag.push(Math.sqrt(re*re+im*im)/N);
+    }
+    const tot=mag.reduce((a,b)=>a+b,0)||1e-9;
+    let cen=0; for(let k=0;k<NH;k++) cen += (k+1)*mag[k]/tot;
+    let ev=0, od=0; for(let k=0;k<NH;k++){ if((k+1)%2) od+=mag[k]; else ev+=mag[k]; }
+    let tot2=0; for(let i=0;i<N;i++) tot2 += d[off+i]*d[off+i];
+    const harm = mag.reduce((a,b)=>a+b*b,0)*N*2;
+    const W=512, env=[];
+    for(let i=0;i+W<d.length;i+=W){ let s=0; for(let j=0;j<W;j++) s+=d[i+j]*d[i+j]; env.push(Math.sqrt(s/W)); }
+    const em=env.reduce((a,b)=>a+b,0)/env.length;
+    let va=0; for(const v of env) va+=Math.pow(v-em,2);
+    out.push({ centroid:cen, evenOdd:ev/Math.max(od,1e-9),
+               noise:Math.max(0,1-harm/Math.max(tot2,1e-9)),
+               trem:Math.sqrt(va/env.length)/Math.max(em,1e-9) });
+  }
+  return out;
+}"""
+
+
+def test_species_timbre_axes_are_all_gene_driven(page, server):
+    """«Все виды звучат одинаково»: тембр брался по ФИКСИРОВАННЫМ индексам
+    гена — шум из гена №7 (trophic), негармоничность из №13 (armor). У всех
+    шести растений «экологии» звериные гены нулевые, поэтому обе оси у них
+    совпадали до последнего знака (шум 0.050, негармоничность 0.0040), а
+    растения — это почти весь мир.
+
+    Теперь каждая ось — знаковая проекция ВСЕГО генома в z-оценках
+    относительно разброса генов по видам этого мира. Требование: ни одна ось
+    не смеет быть константой по видам."""
+    page.click("#btnAudio")
+    try:
+        T = page.evaluate("[...Array(8)].map((_,i)=>viewer.Audio.grainTimbre(i+1))")
+        assert all(T), T
+        plants = T[:6]          # шесть растений: именно они были клонами
+        for axis in ("tilt", "odd", "inh", "nz", "fPos", "morph", "tremHz"):
+            vals = [t[axis] for t in plants]
+            rng = max(vals) - min(vals)
+            rel = rng / max(max(abs(v) for v in vals), 1e-9)
+            assert rel > 0.15, (axis, vals)
+
+        # виды не должны сталкиваться в одну ноту: PENTA сворачивалась в
+        # октаву (%12) и на восемь видов приходилось всего пять высот
+        degs = page.evaluate("[...Array(8)].map((_,i)=>viewer.Audio.PENTA[i %"
+                             " viewer.Audio.PENTA.length])")
+        assert len(set(degs)) == 8, degs
+    finally:
+        page.click("#btnAudio")
+
+
+def test_species_timbres_are_audibly_apart(page, server):
+    """И это слышно в самом звуке, а не только в параметрах: замеряем спектр
+    сэмплов и требуем широкого разброса по яркости и по пульсации."""
+    page.click("#btnAudio")
+    try:
+        F = page.evaluate(_TIMBRE_FEATURES_JS)
+        cen = [f["centroid"] for f in F]
+        trem = [f["trem"] for f in F]
+        eo = [f["evenOdd"] for f in F]
+        # яркость: до фикса центроид укладывался в 1.6x, теперь ~2.5x
+        assert max(cen) / min(cen) > 2.0, cen
+        # пульсация: до фикса разброс был ~0.15 (побочный артефакт), теперь ~0.6
+        assert max(trem) - min(trem) > 0.35, trem
+        assert max(eo) - min(eo) > 0.25, eo
+        # и каждая пара видов различается хотя бы по одной оси
+        def sep(a, b):
+            return max(abs(a["centroid"] - b["centroid"]) / max(a["centroid"], b["centroid"]),
+                       abs(a["trem"] - b["trem"]) / 3.0,
+                       abs(a["evenOdd"] - b["evenOdd"]) / 0.5,
+                       abs(a["noise"] - b["noise"]) / 0.3)
+        worst = min(sep(F[i], F[j]) for i in range(8) for j in range(8) if i < j)
+        assert worst > 0.09, worst
+    finally:
+        page.click("#btnAudio")
+
+
+def test_note_mode_plays_audible_notes_only_when_enabled(page, server):
+    """Режим «Ноты»: отдельные ноты по сетке вместо сплошного дрона гранул.
+    Проверяем не только счётчик, но и РЕАЛЬНЫЙ сигнал на шине — урок
+    гранулярного режима, который «работал», но был на 14 дБ тише всех."""
+    page.click("#btnAudio")
+    try:
+        if page.evaluate("viewer.Audio.ctx.state") != "running":
+            pytest.skip("AudioContext не запустился в headless")
+        page.evaluate("viewer.Audio.notesPlayed = 0; viewer.Audio.setNotes(false)")
+        page.wait_for_timeout(300)
+        assert page.evaluate("viewer.Audio.notesPlayed") == 0
+
+        page.evaluate("viewer.Audio.busH.gain.value=0; viewer.Audio.busV.gain.value=0;"
+                      " viewer.Audio.busN.gain.value=0; viewer.Audio.busG.gain.value=0")
+        page.check("#noteOn")
+        page.evaluate("""() => {
+            const A=viewer.Audio; const an=A.ctx.createAnalyser(); an.fftSize=2048;
+            A.busNo.connect(an); window.__nan=an; window.__peak=0;
+            clearInterval(window.__poll);
+            window.__poll=setInterval(()=>{ const b=new Float32Array(2048);
+                an.getFloatTimeDomainData(b);
+                let m=0; for(let i=0;i<b.length;i++) m=Math.max(m,Math.abs(b[i]));
+                if(m>window.__peak) window.__peak=m; }, 20);
+        }""")
+        page.wait_for_function("viewer.Audio.notesPlayed > 0", timeout=6000)
+        page.wait_for_timeout(1800)
+        assert page.evaluate("window.__peak") > 0.10, page.evaluate("window.__peak")
+
+        page.uncheck("#noteOn")
+        page.wait_for_timeout(250)
+        stopped = page.evaluate("viewer.Audio.notesPlayed")
+        page.wait_for_timeout(500)
+        assert page.evaluate("viewer.Audio.notesPlayed") == stopped
+    finally:
+        page.evaluate("""() => { clearInterval(window.__poll); const A=viewer.Audio;
+            A.setNotes(false);
+            A.busH.gain.value=0.7; A.busV.gain.value=0.6; A.busN.gain.value=0.3;
+            A.busG.gain.value=0.7; }""")
+        page.click("#btnAudio")
+
+
+def test_adsr_differs_per_species_and_follows_the_simulation(page, server):
+    """Форма ADSR завязана на симуляцию отдельно по каждому виду.
+
+    Две проверки. Первая — что огибающая вообще различает виды: если брать
+    только именованные гены (metabolism/lifespan), у всех шести растений
+    «экологии» они нулевые и ADSR совпал бы до знака — ровно та ловушка,
+    из-за которой «все виды звучат одинаково». Вторая — что огибающая
+    реагирует на ЖИВОЕ состояние мира: растущий вид бьёт резче, вымирающий
+    звенит дольше."""
+    page.click("#btnAudio")
+    try:
+        E = page.evaluate("[...Array(8)].map((_,i)=>viewer.Audio.speciesADSR(i+1))")
+        plants = E[:6]
+        for axis in ("a", "d", "s", "r"):
+            vals = [e[axis] for e in plants]
+            assert (max(vals) - min(vals)) / max(vals) > 0.08, (axis, vals)
+
+        # взрывной рост -> атака резче; вымирание -> атака мягче, релиз длиннее
+        base = page.evaluate("(()=>{viewer.Audio._growth[0]=0; return viewer.Audio.speciesADSR(1);})()")
+        boom = page.evaluate("(()=>{viewer.Audio._growth[0]=0.3; return viewer.Audio.speciesADSR(1);})()")
+        dying = page.evaluate("(()=>{viewer.Audio._growth[0]=-0.3; return viewer.Audio.speciesADSR(1);})()")
+        page.evaluate("viewer.Audio._growth[0]=0")
+        assert boom["a"] < base["a"] * 0.5, (base, boom)
+        assert dying["a"] > base["a"] * 1.4, (base, dying)
+        assert dying["r"] > base["r"] * 1.5, (base, dying)
+    finally:
+        page.click("#btnAudio")
+
+
+def test_euclidean_rhythm_tracks_species_share(page, server):
+    """Ритм вида — евклидов рисунок, плотность которого задаёт доля вида в
+    населении: доминирующий бьёт часто, редкий изредка. Без этого сетка была
+    бы метрономом, одинаковым для всех и не связанным с экологией."""
+    page.click("#btnAudio")
+    try:
+        hits = page.evaluate("""() => {
+            const A=viewer.Audio, n=16, out={};
+            for (const [name, share] of [['rare',0.05],['mid',0.4],['dom',0.95]]){
+                const k=Math.max(1, Math.min(n, Math.round(1 + share*(n-1)*0.8)));
+                let c=0; for(let i=0;i<n;i++) if (A.euclid(k,n,i)) c++;
+                out[name]=c;
+            }
+            // и сам рисунок не вырожденный: E(5,16) даёт ровно 5 ударов,
+            // распределённых, а не слипшихся в начало
+            const pat=[]; for(let i=0;i<16;i++) pat.push(A.euclid(5,16,i)?1:0);
+            out.pat=pat;
+            return out;
+        }""")
+        assert hits["rare"] < hits["mid"] < hits["dom"], hits
+        assert sum(hits["pat"]) == 5, hits["pat"]
+        # удары не слиплись в первые пять шагов
+        assert sum(hits["pat"][:5]) < 4, hits["pat"]
+    finally:
+        page.click("#btnAudio")
