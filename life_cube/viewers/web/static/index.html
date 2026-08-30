@@ -1131,23 +1131,38 @@ const Audio = {
     when = Math.max(when, ctx.currentTime);   // setValueCurveAtTime в прошлое бросает
     const x=S.coords[i*3], y=S.coords[i*3+1], z=S.coords[i*3+2];
     const src=ctx.createBufferSource(); src.buffer=buf;
-    // высота: ступень пентатоники по виду (виды складываются в аккорд, а не
-    // в кашу — та же логика, что в «Кристалле») + октава по высоте клетки
-    const deg = this.PENTA[(sp-1) % this.PENTA.length];
-    const oct = Math.round(z/n*3) - 1;
-    src.playbackRate.value = Math.pow(2, oct + deg/12 + this.speciesDetune(sp)/1200) * (this.baseHz/55);
-    const off = Math.max(0, Math.min(buf.duration - dur, buf.duration * (y/n)));
+    // Высота: ступень пентатоники по виду В ПРЕДЕЛАХ ОКТАВЫ (%12) + октава
+    // по высоте клетки. Полная пентатоника PENTA доходит до 22 полутонов —
+    // почти две октавы; вместе с высотой это давало разброс под пять октав,
+    // и верхние зёрна улетали в свист. Плюс жёсткий кламп rate: на краях
+    // (верх куба + дальний вид + высокий базовый тон) он доходил до ~19x —
+    // обертоны за Найквистом и зерно длиной 4 мс, то есть еле слышный
+    // щелчок вместо ноты.
+    const deg = this.PENTA[(sp-1) % this.PENTA.length] % 12;
+    const oct = Math.round(z/n*2) - 1;
+    const rate = Math.min(4, Math.max(0.25,
+      Math.pow(2, oct + deg/12 + this.speciesDetune(sp)/1200) * (this.baseHz/55)));
+    src.playbackRate.value = rate;
+    // ВАЖНО: третий аргумент start() — длительность во ВРЕМЕНИ БУФЕРА, а не
+    // в реальном. Без домножения на rate зерно на высокой ноте кончалось
+    // в rate раз раньше собственной огибающей Ханна — обрубок вместо ноты.
+    const grabbed = (dur + 0.02) * rate;
+    const off = Math.max(0, Math.min(Math.max(0, buf.duration - grabbed), buf.duration * (y/n)));
     const g=ctx.createGain(); g.gain.value=0;
     const p=ctx.createStereoPanner(); p.pan.value = 2*x/n - 1;
     src.connect(g); g.connect(p); p.connect(this.busG);
-    // окно Ханна на каждое зерно: без него стык зерна с тишиной щёлкает.
-    // Амплитуда падает как 1/sqrt(плотности) — облако из 100 зёрен в
-    // секунду не должно быть в 100 раз громче облака из одного
-    const amp = 0.5/Math.sqrt(Math.max(dens,1));
+    // Окно Ханна на каждое зерно: без него стык зерна с тишиной щёлкает.
+    // Амплитуда нормируется по КОЭФФИЦИЕНТУ ПЕРЕКРЫТИЯ (dur*dens) — сколько
+    // зёрен реально звучит одновременно, — а не по сырой плотности. Было
+    // 0.5/sqrt(dens): при 40 зёрнах/с это 0.08 на зерно и ~0.04 на шине,
+    // на 14 дБ тише полос. Режим формально работал, но его не было слышно —
+    // ровно на это и пожаловались.
+    const overlap = Math.max(1, dur*dens);
+    const amp = 0.9/Math.sqrt(overlap);
     const curve = new Float32Array(this.hannCurve.length);
     for (let q=0;q<curve.length;q++) curve[q] = this.hannCurve[q]*amp;
     try { g.gain.setValueCurveAtTime(curve, when, dur); } catch(e){ return; }
-    src.start(when, off, dur + 0.02);
+    src.start(when, off, grabbed);
     src.onended = ()=>{ try{ src.disconnect(); g.disconnect(); p.disconnect(); }catch(e){} };
     this.grainsPlayed++;
   },

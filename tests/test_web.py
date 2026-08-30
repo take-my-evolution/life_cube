@@ -643,3 +643,70 @@ def test_granular_grain_maps_cell_axes_to_sound(page, server):
         assert hi["rate"] > lo["rate"] * 1.5, (lo, hi)
     finally:
         page.click("#btnAudio")
+
+
+def test_granular_bus_is_actually_audible_and_faders_move_it(page, server):
+    """САМАЯ ВАЖНАЯ проверка режима, и та, которой сначала не было: зёрна не
+    просто создаются — на шине гранул есть РЕАЛЬНЫЙ СИГНАЛ слышимого уровня,
+    и ползунки его двигают.
+
+    Первая версия режима все проверки на узлах проходила, но звучала на
+    ~14 дБ тише полос (0.04 против 0.20 по пику) и полностью тонула в
+    миксе — «включаю, кручу ползунки, звук не меняется». Тесты на создание
+    узлов такое пропускают по построению; ловит только замер выхода."""
+    page.click("#btnAudio")
+    try:
+        if page.evaluate("viewer.Audio.ctx.state") != "running":
+            pytest.skip("AudioContext не запустился в headless — мерить нечего")
+        page.check("#grainOn")
+        # глушим остальные слои: меряем именно гранулы
+        page.evaluate("viewer.Audio.busH.gain.value=0; viewer.Audio.busV.gain.value=0;"
+                      " viewer.Audio.busN.gain.value=0")
+
+        tap = """() => {
+            const A = viewer.Audio;
+            clearInterval(window.__poll);
+            if (window.__an) { try { A.busG.disconnect(window.__an); } catch(e){} }
+            const an = A.ctx.createAnalyser(); an.fftSize = 2048;
+            A.busG.connect(an); window.__an = an; window.__peak = 0;
+            window.__poll = setInterval(() => {
+                const b = new Float32Array(2048); an.getFloatTimeDomainData(b);
+                let m = 0; for (let i=0;i<b.length;i++) m = Math.max(m, Math.abs(b[i]));
+                if (m > window.__peak) window.__peak = m;
+            }, 20);
+        }"""
+
+        page.evaluate(tap)
+        page.wait_for_timeout(1500)
+        loud = page.evaluate("window.__peak")
+        # до фикса тут было ~0.04 — формально «работает», на слух нет
+        assert loud > 0.12, loud
+
+        # ползунок микса реально двигает уровень
+        page.evaluate("viewer.Audio.busG.gain.value = 0.15")
+        page.evaluate(tap)
+        page.wait_for_timeout(1500)
+        quiet = page.evaluate("window.__peak")
+        assert quiet < loud * 0.5, (loud, quiet)
+
+        # ползунок плотности реально меняет поток зёрен
+        page.evaluate("viewer.Audio.busG.gain.value = 0.7")
+        rates = {}
+        for want in (4, 140):
+            page.evaluate(f"() => {{ document.getElementById('grainRate').value = {want}; }}")
+            page.wait_for_timeout(250)
+            n0 = page.evaluate("viewer.Audio.grainsPlayed")
+            page.wait_for_timeout(1200)
+            rates[want] = (page.evaluate("viewer.Audio.grainsPlayed") - n0) / 1.2
+        assert rates[140] > rates[4] * 4, rates
+    finally:
+        page.evaluate("""() => {
+            clearInterval(window.__poll);
+            const A = viewer.Audio;
+            document.getElementById('grainRate').value = 40;
+            A.busG.gain.value = 0.7;
+            A.busH.gain.value = 0.7; A.busV.gain.value = 0.6; A.busN.gain.value = 0.3;
+            A.setGrain(false);
+        }""")
+        page.uncheck("#grainOn")
+        page.click("#btnAudio")

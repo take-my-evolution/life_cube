@@ -16,6 +16,6 @@ from .config import Config, DEFAULT_GENOMES, GENOME_FIELDS, SPECIES_NAMES
 from .sim import run
 from .step import step
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 __all__ = ["Config", "DEFAULT_GENOMES", "GENOME_FIELDS", "SPECIES_NAMES",
            "run", "step", "__version__"]
