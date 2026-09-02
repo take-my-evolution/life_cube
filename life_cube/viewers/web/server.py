@@ -75,7 +75,7 @@ def encode_snapshot(snap: Snapshot, first=False, sound=None, sent=None) -> bytes
     maps = {}
     if snap.stone_h is not None:
         header["heightmaps"] = True
-        for key in ("stone_h", "soil_h", "water_h", "log_h"):
+        for key in ("stone_h", "soil_h", "water_h"):
             a = getattr(snap, key, None)
             if a is None:
                 continue
@@ -99,7 +99,7 @@ def encode_snapshot(snap: Snapshot, first=False, sound=None, sent=None) -> bytes
     if header["labels"]:
         parts.append(np.ascontiguousarray(snap.labels, dtype=np.uint32).tobytes())
     parts.append(np.ascontiguousarray(soil, dtype=np.uint16).tobytes())
-    for key in ("stone_h", "soil_h", "water_h", "log_h"):
+    for key in ("stone_h", "soil_h", "water_h"):
         a = getattr(snap, key, None)
         if a is not None and header.get("maps", {}).get(key):
             parts.append(np.ascontiguousarray(a, dtype=np.uint16).tobytes())
@@ -120,7 +120,7 @@ def decode_snapshot(buf: bytes):
         labels = np.zeros(k, np.uint32)
     soil = np.frombuffer(buf, np.uint16, m * 3, off).reshape(m, 3); off += m * 6
     n = header["n"]
-    for key in ("stone_h", "soil_h", "water_h", "log_h"):
+    for key in ("stone_h", "soil_h", "water_h"):
         if header.get("maps", {}).get(key):
             header[key] = np.frombuffer(buf, np.uint16, n * n, off).reshape(n, n); off += n * n * 2
     return header, coords, species, labels, soil

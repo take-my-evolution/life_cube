@@ -43,10 +43,7 @@ def arrays(st):
 
 
 def surface_of(st):
-    """Поверхность = камень + почва + КОЛОДЫ: упавший ствол тоже часть рельефа."""
-    out = np.asarray(st["stone_h"]) + np.asarray(st["soil_h"])
-    log = st.get("log_h")
-    return out + np.asarray(log) if log is not None else out
+    return np.asarray(st["stone_h"]) + np.asarray(st["soil_h"])
 
 
 def test_registered():
@@ -160,12 +157,16 @@ def test_animals_stay_on_the_ground(run):
     _, _, st, _ = run
     sp, stone, soil = arrays(st)
     surf = surface_of(st)
+    seen = 0
     for s in (HERB, PRED):
         cells = np.argwhere(sp == s)
-        assert len(cells) > 5
+        if not len(cells):
+            continue          # баланс на краю: вид мог как раз проваливаться
+        seen += 1
         # шаг делается по поверхности; допустима одна клетка на плоском растении
         high = sum(1 for x, y, z in cells if z > surf[x, y] + 1)
         assert high == 0, f"вид {s}: {high} зверей выше подложки"
+    assert seen, "в мире не осталось ни одного зверя — проверять нечего"
 
 
 def test_soil_slides_into_hollows():
@@ -416,16 +417,43 @@ def test_trunks_keep_their_distance():
 
 def test_trees_spread_by_seeds_beyond_their_crown():
     """Со ссылкой на просвет между стволами: расти вбок дерево не может, значит
-    новые деревья берутся только из семян, улетевших дальше кроны."""
-    R, cfg, st, _ = world(n=48, gens=60, seed=11)
-    tid = np.asarray(st["tree_id"])
-    was = int(np.unique(tid[tid > 0]).size)
+    новые деревья берутся только из семян, улетевших дальше кроны.
+
+    Мир строим нарочно: одно взрослое дерево посреди чистой почвы. В зрелом
+    лесу свободных мест почти нет, и «стало больше деревьев» там уже ничего не
+    доказывает — численность держится смертями, а не всходами.
+    """
+    R = get_rules("slope")
+    cfg = R.make_config(n=32, seed_world=5, seed_animals=0.0, seed_tree=0.0,
+                        seed_density=0.0, mutate_rate=0.0, soil_slide=0.0,
+                        soil_start=1.0, seed_fall=0.05)
     xp, corr, _ = get_backend(False)
-    for g in range(61, 400):
+    st, _ = R.init_state(cfg, xp)
+    soil = np.asarray(st["soil_h"])
+    stone = np.asarray(st["stone_h"])
+    surf = stone + soil
+    sp = np.zeros_like(np.asarray(st["species"]))
+    en = np.zeros_like(np.asarray(st["energy"]))
+    ground = np.argwhere(soil > 0)
+    assert len(ground) > 50
+    x, y = map(int, ground[len(ground) // 2])
+    trunk = int(cfg.genomes[TREE - 1][IDX["trunk"]])
+    for k in range(trunk + 2):                   # одно взрослое дерево
+        sp[x, y, int(surf[x, y]) + k] = TREE
+    en[x, y, int(surf[x, y])] = 500.0            # кошелёк полон: пора сеять
+    st["species"], st["energy"] = xp.asarray(sp), xp.asarray(en)
+
+    for g in range(1, 300):
         R.step(st, cfg, xp, corr, g)
-    tid = np.asarray(st["tree_id"])
-    now = int(np.unique(tid[tid > 0]).size)
-    assert now > was, f"деревьев было {was}, стало {now} — семена не всходят"
+        cur = np.asarray(st["species"])
+        roots = [(int(a), int(b)) for a, b, c in np.argwhere(cur == TREE)
+                 if c == surf[a, b]]
+        far = [(a, b) for a, b in roots if max(abs(a - x), abs(b - y)) >= cfg.trunk_spacing]
+        if far:
+            break
+    else:
+        raise AssertionError("ни одно семя не взошло за 300 поколений")
+    assert all(max(abs(a - x), abs(b - y)) >= cfg.trunk_spacing for a, b in far)
 
 
 # --- мутация вместо подсева -------------------------------------------------
@@ -546,21 +574,21 @@ def test_herbivore_does_not_eat_moss():
     assert after >= before, f"мха было {before}, стало {after} — его съели"
 
 
-def test_a_dying_tree_falls_over(  ):
-    """Ствол ПАДАЕТ: валится в случайную сторону и ложится линией по земле
-    длиной со своё дерево. Прежняя колода вставала тумбой на месте корня, да
-    ещё высотой в погребённую под ней почву — в кадре это были чёрные каменные
-    столбики непонятного происхождения."""
+def test_a_dying_tree_falls_and_kills_the_soil_under_it():
+    """Ствол ПАДАЕТ: валится в случайную сторону и по всей длине подменяет
+    почву камнем. Высота поверхности при этом не меняется вовсе — значит,
+    ничего не повисает в воздухе и ничего не хоронится."""
     R = get_rules("slope")
     cfg = R.make_config(n=20, seed_world=3, seed_animals=0.0, seed_tree=0.0,
                         seed_density=0.0, mutate_rate=0.0, soil_slide=0.0)
     xp, corr, _ = get_backend(False)
     st, _ = R.init_state(cfg, xp)
     stone0, soil0 = np.asarray(st["stone_h"]).copy(), np.asarray(st["soil_h"]).copy()
+    surf0 = stone0 + soil0
     x, y = map(int, np.argwhere(soil0 > 0)[0])
     sp = np.zeros_like(np.asarray(st["species"]))
     en = np.zeros_like(np.asarray(st["energy"]))
-    z0 = int(stone0[x, y] + soil0[x, y])
+    z0 = int(surf0[x, y])
     trunk = int(cfg.genomes[TREE - 1][IDX["trunk"]])
     for k in range(trunk + 3):
         sp[x, y, z0 + k] = TREE
@@ -574,81 +602,71 @@ def test_a_dying_tree_falls_over(  ):
     R.step(st, cfg, xp, corr, 2)
 
     assert int((np.asarray(st["species"]) == TREE).sum()) == 0
-    log = np.asarray(st["log_h"])
-    cells = np.argwhere(log > 0)
-    assert len(cells) > 1, "колода осталась в одной клетке — ствол не упал"
-    assert int(log.max()) == 1, "колода встала столбиком, а должна лежать"
-    assert len(cells) <= height, (len(cells), height)
-    # ложится ПРЯМОЙ линией из места, где стояло дерево
-    assert (len(set(map(int, cells[:, 0]))) == 1) or (len(set(map(int, cells[:, 1]))) == 1)
-    assert any(int(a) == x and int(b) == y for a, b in cells)
-    # камень при этом никуда не вырос и почву не съел
-    assert np.array_equal(np.asarray(st["stone_h"]), stone0)
-    assert int(np.asarray(st["soil_h"])[x, y]) == int(soil0[x, y])
+    stone, soil = np.asarray(st["stone_h"]), np.asarray(st["soil_h"])
+    killed = np.argwhere((soil == 0) & (soil0 > 0))
+    assert len(killed) > 1, "ствол не упал: мертва только одна клетка"
+    assert len(killed) <= height, (len(killed), height)
+    assert (len(set(map(int, killed[:, 0]))) == 1) or (len(set(map(int, killed[:, 1]))) == 1), \
+        "полоса не прямая — ствол не лёг, а рассыпался"
+    assert any(int(a) == x and int(b) == y for a, b in killed)
+    # высота поверхности не изменилась НИГДЕ: висеть и хорониться нечему
+    assert np.array_equal(stone + soil, surf0)
 
 
-def test_nothing_grows_on_a_fallen_log():
-    """Пока ствол лежит, места растениям там нет: колода — не подложка."""
+def test_nothing_grows_where_a_trunk_fell():
+    """Под упавшим стволом земля мертва: расти там нельзя никому, кроме мха."""
     R = get_rules("slope")
     cfg = R.make_config(n=16, seed_world=3, seed_animals=0.0, seed_tree=0.0,
                         seed_density=0.0, mutate_rate=0.0, soil_slide=0.0,
                         erode_rate=0.0)
     xp, corr, _ = get_backend(False)
     st, _ = R.init_state(cfg, xp)
-    soil = np.asarray(st["soil_h"])
-    log = np.zeros_like(np.asarray(st["log_h"]))
-    spots = np.argwhere(soil > 0)[:8]
-    for x, y in spots:
-        log[x, y] = 1                            # колода поперёк луговины
-    st["log_h"] = xp.asarray(log)
+    stone = np.asarray(st["stone_h"]).copy()
+    soil = np.asarray(st["soil_h"]).copy()
+    strip = [tuple(map(int, c)) for c in np.argwhere(soil > 0)[:6]]
+    for x, y in strip:                           # полоса упавшего ствола
+        stone[x, y] += soil[x, y]
+        soil[x, y] = 0
+    st["stone_h"], st["soil_h"] = xp.asarray(stone), xp.asarray(soil)
     sp = np.zeros_like(np.asarray(st["species"]))
     en = np.zeros_like(np.asarray(st["energy"]))
-    surf = np.asarray(st["stone_h"]) + soil + log
-    for x, y in np.argwhere(soil > 0)[8:24]:     # трава кругом, но не на колоде
-        sp[x, y, int(surf[x, y])] = GRASS
+    surf = stone + soil
+    for x, y in [tuple(map(int, c)) for c in np.argwhere(soil > 0)[:20]]:
+        sp[x, y, int(surf[x, y])] = GRASS        # трава кругом полосы
         en[x, y, int(surf[x, y])] = 20.0
     st["species"], st["energy"] = xp.asarray(sp), xp.asarray(en)
     for g in range(1, 200):
         R.step(st, cfg, xp, corr, g)
     cur = np.asarray(st["species"])
-    log = np.asarray(st["log_h"])
-    on_log = [(x, y) for x, y in np.argwhere(log > 0) if (cur[x, y] == GRASS).any()]
-    assert not on_log, f"на колоде выросла трава: {on_log[:4]}"
+    grown = [(x, y) for x, y in strip if (cur[x, y] == GRASS).any()]
+    assert not grown, f"на мёртвой полосе выросла трава: {grown[:4]}"
 
 
-def test_moss_rots_a_log_into_soil():
-    """Круг замыкается: лес → колода → мох → почва. Древесину в этом мире
-    перерабатывает мох, он же живёт на голом камне.
-
-    Дождь и скорость точения задраны: проверяем МЕХАНИЗМ, а не то, за сколько
-    поколений он сработает в сухом углу карты (мох точит только по мокрому).
-    """
+def test_moss_takes_over_the_dead_strip_and_makes_soil_again():
+    """Круг замыкается: дерево упало → камень → мох → снова почва."""
     R = get_rules("slope")
     cfg = R.make_config(n=16, seed_world=3, seed_animals=0.0, seed_tree=0.0,
                         seed_density=0.0, mutate_rate=0.0, soil_slide=0.0,
                         erode_rate=0.2, rain_rate=0.5, rain_amount=2.0)
     xp, corr, _ = get_backend(False)
     st, _ = R.init_state(cfg, xp)
-    soil0 = np.asarray(st["soil_h"])
-    x, y = map(int, np.argwhere(soil0 > 0)[0])
-    log = np.zeros_like(np.asarray(st["log_h"]))
-    log[x, y] = 1
-    st["log_h"] = xp.asarray(log)
+    stone = np.asarray(st["stone_h"]).copy()
+    soil = np.asarray(st["soil_h"]).copy()
+    x, y = map(int, np.argwhere(soil > 0)[0])
+    stone[x, y] += soil[x, y]
+    soil[x, y] = 0
+    st["stone_h"], st["soil_h"] = xp.asarray(stone), xp.asarray(soil)
     sp = np.zeros_like(np.asarray(st["species"]))
     en = np.zeros_like(np.asarray(st["energy"]))
-    z = int(np.asarray(st["stone_h"])[x, y] + soil0[x, y] + 1)
-    sp[x, y, z] = MOSS                           # мох поселился на колоде
-    en[x, y, z] = 10.0
+    sp[x, y, int(stone[x, y])] = MOSS            # мох сел на мёртвую полосу
+    en[x, y, int(stone[x, y])] = 10.0
     st["species"], st["energy"] = xp.asarray(sp), xp.asarray(en)
-    st["wet"] = xp.ones((cfg.n, cfg.n), dtype=xp.float32)
-    soil_was = int(soil0[x, y])
     for g in range(1, 400):
         R.step(st, cfg, xp, corr, g)
-        if int(np.asarray(st["log_h"])[x, y]) == 0:
+        if int(np.asarray(st["soil_h"])[x, y]) > 0:
             break
     else:
-        raise AssertionError("мох не сгноил колоду за 3000 поколений")
-    assert int(np.asarray(st["soil_h"])[x, y]) > soil_was, "колода исчезла без почвы"
+        raise AssertionError("мох не вернул полосу в почву за 400 поколений")
 
 
 def test_the_hill_is_not_buried_in_the_plain():
@@ -687,3 +705,48 @@ def test_client_random_button_respects_the_fixed_list():
     i = html.index("btnRandom')")
     chunk = html[i:i + 1200]
     assert "fixed_genes" in chunk, "кнопка не спрашивает движок"
+
+
+def test_the_chain_lives_on_the_edge():
+    """Баланс намеренно поставлен на край: хищник достаточно удачлив, чтобы
+    выесть травоядных и издохнуть следом, а мутация возвращает выпавшее звено —
+    к этому времени корма снова хватает, чтобы вид разошёлся.
+
+    Проверяем ровно это: цепь ДОЛЖНА срываться (иначе мир скучный и вечный) и
+    ДОЛЖНА возвращаться (иначе он мёртвый).
+    """
+    R = get_rules("slope")
+    xp, corr, _ = get_backend(False)
+    cfg = R.make_config(n=48, seed_world=7)
+    st, _ = R.init_state(cfg, xp)
+    crashes = np.zeros(5, int)
+    was_alive = np.ones(5, bool)
+    for g in range(1, 1500):
+        pop = np.array(R.step(st, cfg, xp, corr, g))
+        if g < 200:
+            continue
+        gone = pop == 0
+        crashes += (gone & was_alive).astype(int)
+        was_alive = ~gone
+    assert crashes[HERB - 1] + crashes[PRED - 1] >= 2, \
+        f"цепь ни разу не сорвалась: {crashes}"
+    assert crashes[MOSS - 1] == 0 and crashes[GRASS - 1] == 0, \
+        f"основание пирамиды не должно падать: {crashes}"
+    # и в конце мир жив: провалы затягиваются мутацией, а не остаются навсегда
+    assert sum(int(v) for v in pop) > 500
+
+
+def test_the_engine_has_no_genome_drift():
+    """В этом движке гены не плывут: мутация переводит клетку в ДРУГОЙ ВИД, а
+    геном вида остаётся тем, что задан в конструкторе. Иначе за тысячи
+    поколений таблица генов уезжает сама собой, и мир уже не тот, что настроил
+    пользователь."""
+    R = get_rules("slope")
+    cfg = R.make_config(n=32, seed_world=5)
+    before = np.asarray(cfg.genomes).copy()
+    xp, corr, _ = get_backend(False)
+    st, _ = R.init_state(cfg, xp)
+    for g in range(1, 300):
+        R.step(st, cfg, xp, corr, g)
+    assert np.array_equal(np.asarray(cfg.genomes), before), "геном уехал сам"
+    assert np.array_equal(np.asarray(st["genomes"]), before)

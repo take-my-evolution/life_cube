@@ -273,8 +273,6 @@ class Engine:
                 snap.soil_h = to_cpu(self.state["soil_h"]).astype("uint16")
                 w = self.state.get("water_h")
                 snap.water_h = to_cpu(w).astype("uint16") if w is not None else None
-                lg = self.state.get("log_h")
-                snap.log_h = to_cpu(lg).astype("uint16") if lg is not None else None
             snap.soil_coords = None
             self.relief = snap.stone_h
         snap.relief = self.relief

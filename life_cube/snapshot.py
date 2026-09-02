@@ -38,7 +38,6 @@ class Snapshot:
     # весят по-разному, поэтому «сколько живого в мире» — это не число клеток
     biomass: list = None
     organisms: list = None
-    log_h: np.ndarray = None
     components: list = field(default_factory=list)   # [Component]
     soil_coords: np.ndarray = None  # (m, 3) uint16 — растворённый камень (разреженно)
     # для движков, где подложка — карты высот: рельеф передаётся ими, а не
