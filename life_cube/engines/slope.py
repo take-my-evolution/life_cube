@@ -118,7 +118,7 @@ class SlopeConfig:
     seed_fall: float = 0.004    # шанс всхода на подходящем месте
     seed_maturity: float = 1.2  # во сколько цен клетки кошелёк даёт семя
     mutate_rate: float = 0.0015  # базовый шанс ошибки при делении
-    mutate_rescue: float = 60.0  # во сколько раз чаще, если ниша пуста
+    mutate_rescue: float = 10.0  # во сколько раз чаще, если ниша пуста
     crowd_max: int = 5
     p_shock: float = 0.0006
     start_energy: float = 4.0

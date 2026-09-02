@@ -437,3 +437,29 @@ def test_species_table_counts_tree_organisms_not_cells():
     assert snap.organisms[TREE - 1] < snap.pops[TREE - 1], (snap.organisms, snap.pops)
     for s in (MOSS, GRASS, HERB, PRED):
         assert snap.organisms[s - 1] == snap.pops[s - 1]
+
+
+def test_mutation_knobs_apply_without_recreating_the_world():
+    """Обе ручки мутации живые: шанс читается на каждом делении, поэтому
+    менять их можно на ходу, не стирая популяцию пересозданием мира."""
+    from life_cube.engine import Engine
+
+    R = get_rules("slope")
+    e = Engine(cfg=R.make_config(n=32, seed_world=11), rules="slope", components=False)
+    for _ in range(60):
+        e.advance()
+    st = {"pops": [100, 800, 50, 200, 0], "niche": {1: 800, 2: 1000, 3: 100,
+                                                    4: 1000, 5: 1000}}
+    was = R.mutation_chance(st, e.cfg, 4, 5)
+    gen_before, k_before = e.gen, int((np.asarray(e.state["species"]) > 0).sum())
+    e.set_world(mutate_rescue=100.0)
+    now = R.mutation_chance(st, e.cfg, 4, 5)
+    assert now > was * 5, (now, was)
+    assert e.gen == gen_before and int((np.asarray(e.state["species"]) > 0).sum()) == k_before, \
+        "мир пересоздался от поворота ручки"
+
+
+def test_default_rescue_is_modest():
+    """По умолчанию пустая ниша ускоряет возврат в 10 раз, не в 60: иначе
+    вымираний не видно вовсе."""
+    assert get_rules("slope").Config().mutate_rescue == 10.0
