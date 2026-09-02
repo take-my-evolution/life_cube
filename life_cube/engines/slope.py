@@ -62,7 +62,7 @@ COLORS = ("#9fb3a8", "#7bd94a", "#2e8b3d", "#4a9ef2", "#f24a9e")
 #                 light absorb subst trunk branch erode metab repro  life mass hunt tro spd sns armor
 GENOMES = np.array([
     [0.55, 0.10, 0.0,  0,  0.40, 0.30, 0.006,  3.0,    0, 0.5, 0.0, 0, 0, 0, 0.90],  # мох
-    [0.85, 0.22, 1.0,  0,  0.90, 0.00, 0.020,  0.8,  300, 1.0, 0.0, 0, 0, 0, 0.05],  # трава
+    [0.85, 0.22, 1.0,  0,  0.90, 0.00, 0.020,  0.8,  300, 1.0, 0.0, 0, 0, 0, 0.35],  # трава
     [0.95, 0.50, 1.0,  5,  1.20, 0.00, 0.050,  1.6, 1200, 5.0, 0.0, 0, 0, 0, 0.95],  # дерево
     [0.00, 0.00, 0.0,  0,  0.00, 0.00, 0.015,  6.0,  400, 4.0, 0.15, 1, 1, 5, 0.45],  # травоядное
     [0.00, 0.00, 0.0,  0,  0.00, 0.00, 0.120,  8.0,  900, 6.0, 0.10, 2, 2, 7, 0.05],  # хищник
@@ -74,10 +74,19 @@ N_SPECIES = len(NAMES)
 # приходит не кубиками, брошенными на карту, а сбоем размножения у того, кто
 # уже живёт. Пары — только по соседним ярусам: растение может дать травоядное,
 # травоядное — хищника, трава — дерево. Через ярус не прыгают.
+# Кто кого ест. Раньше добычей считалось всё, что ярусом ниже, — а на нулевом
+# ярусе вместе с травой и деревом стоит МОХ, и травоядные паслись на камнях.
+# Мох в этом мире — не корм, а порода: он точит камень и готовит почву, и
+# съесть его некому (в природе лишайник и правда почти никем не поедается).
+DIET = {
+    4: (2, 3),      # травоядное — трава и дерево
+    5: (4,),        # хищник — травоядное
+}
+
 MUTATIONS = {
-    1: (4,),        # мох      -> травоядное
-    2: (3, 4),      # трава    -> дерево, травоядное
-    3: (4,),        # дерево   -> травоядное
+    1: (2, 4),      # мох        -> трава, травоядное
+    2: (1, 3, 4),   # трава      -> мох, дерево, травоядное
+    3: (2, 4),      # дерево     -> трава, травоядное
     4: (5,),        # травоядное -> хищник
 }
 
@@ -114,6 +123,7 @@ class SlopeConfig:
     water_gain: float = 0.5         # прибавка к ресурсу от воды
     crown_light: float = 0.35   # ниже этого света крона не разрастается
     trunk_spacing: int = 3      # ближе этого стволы друг к другу не встают
+    log_stone: bool = True      # погибшее дерево оставляет колоду (камень)
     seed_range: int = 6         # как далеко дерево роняет семя
     seed_fall: float = 0.004    # шанс всхода на подходящем месте
     seed_maturity: float = 1.2  # во сколько цен клетки кошелёк даёт семя
@@ -215,9 +225,12 @@ class SlopeRules(Rules):
         n = cfg.n
         stone_h = hill_relief(cfg, rng)
         soil_h = np.zeros((n, n), np.int32)
-        if cfg.soil_start > 0:                    # немного почвы в низинах; дальше её делает мох
+        if cfg.soil_start > 0:
+            # Тонкий слой почвы в низинах, дальше её делает мох. Слой именно
+            # ТОНКИЙ: при трёх клетках подножие горы тонуло в равнине, и гора
+            # выглядела наполовину закопанной.
             rel = (stone_h - stone_h.min()) / max(stone_h.max() - stone_h.min(), 1)
-            soil_h = np.round(cfg.soil_start * 3.0 * (1 - rel) ** 2).astype(np.int32)
+            soil_h = np.round(cfg.soil_start * (1 - rel) ** 2).astype(np.int32)
         species = np.zeros((n, n, n), np.uint8)
         energy = np.zeros((n, n, n), np.float32)
         surf = stone_h + soil_h
@@ -481,6 +494,7 @@ class SlopeRules(Rules):
             plants = alive & ~is_anim
             idx = xp.clip(species.astype(xp.int32) - 1, 0, N_SPECIES - 1)
         state["tree_id"] = tree_id
+        had_root = (trunky & (zz == surface[:, :, None])).any(axis=2)
 
         # похороненное подложкой гибнет
         buried = alive & (zz < surface[:, :, None])
@@ -546,6 +560,20 @@ class SlopeRules(Rules):
         age = xp.where(dead, 0, age)
         alive = species > 0
         plants = alive & ~is_anim
+
+        # --- 6б. колода: погибшее дерево оставляет после себя камень ----------
+        # Ствол не исчезает бесследно: он лежит на земле, накрывает почву, и
+        # растениям там места нет. За переработку древесины в этом мире отвечает
+        # МОХ — единственный, кто живёт на голом камне: он медленно точит колоду
+        # обратно в почву. Круг замыкается: лес → колода → камень → мох → почва.
+        if cfg.log_stone:
+            now_root = (plants & gtrunk[idx] & (zz == surface[:, :, None])).any(axis=2)
+            logs = had_root & ~now_root          # где корень был, а теперь нет
+            if bool(logs.any()):
+                add = logs.astype(stone_h.dtype)
+                stone_h = stone_h + add * (soil_h + 1)   # колода накрывает почву
+                soil_h = xp.where(logs, 0, soil_h)
+                surface = stone_h + soil_h
 
         # --- 7. рождение растений --------------------------------------------
         species, energy, age = self._grow(
@@ -881,7 +909,7 @@ class SlopeRules(Rules):
             here = np.argwhere(sp == s)
             if not len(here):
                 continue
-            prey_sp = [i + 1 for i in range(N_SPECIES) if int(G[i][IDX["trophic"]]) == level - 1]
+            prey_sp = [i for i in DIET.get(s, ()) if 1 <= i <= N_SPECIES]
             prey2d = np.zeros((n, n), np.float32)
             for ps in prey_sp:
                 prey2d += (sp == ps).any(axis=2).astype(np.float32)
@@ -1089,6 +1117,7 @@ class SlopeRules(Rules):
             "genomes": np.asarray(cfg.genomes).tolist(),
             "world": {k: getattr(cfg, k) for k in self.WORLD_PARAMS},
             "world_labels": self.WORLD_LABELS, "world_ranges": self.WORLD_RANGES,
+            "fixed_genes": list(self.fixed_genes(cfg)),
             "starters": self.starters_json(cfg),
             "reseed": seeding_json(cfg),
         }
@@ -1100,12 +1129,17 @@ class SlopeRules(Rules):
         cfg.genomes = g
         state["genomes"] = xp.asarray(g)
 
+    # Роль, подложка и форма роста случайными не бывают: мох со стволом 9 — это
+    # не «другой мох», это сломанный мир. Список едет и клиенту, чтобы кнопка
+    # «случайные гены» в панели не крутила то, что движок держит.
+    FIXED_GENES = ("trophic", "speed", "substrate", "trunk")
+
     def randomize(self, cfg, rng):
         g = np.asarray(cfg.genomes, dtype=np.float32).copy()
         for s in range(N_SPECIES):
             for name, i in IDX.items():
-                if name in ("trophic", "speed", "substrate", "trunk"):
-                    continue          # роль, подложка и форма роста — не случайны
+                if name in self.FIXED_GENES:
+                    continue
                 lo, hi, _ = RANGES[name]
                 g[s, i] = rng.uniform(lo, hi)
         return g

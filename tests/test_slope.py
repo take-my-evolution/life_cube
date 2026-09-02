@@ -9,6 +9,8 @@
   * почва съезжает вниз: низины зарастают, вершины остаются под мхом.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -113,15 +115,15 @@ def test_crown_shades_the_ground(run):
     xs, ys = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
     ground_light = L[xs, ys, np.clip(surf, 0, n - 1)]
 
-    crown = (sp == TREE).any(axis=2)
-    assert crown.sum() > 3, "деревьев в мире нет — тень мерить не на чем"
-    shade = np.zeros_like(crown)
-    for x, y in np.argwhere(crown):
-        shade[max(0, x - 1):x + 2, max(0, y - 1):y + 2] = True
+    # меряем ПОД кроной, а не в кольце вокруг: крона компактная, и соседние
+    # столбцы она не затеняет — от этого утверждение про кольцо разъезжается
+    under_crown = (sp == TREE).any(axis=2)
+    assert under_crown.sum() > 3, "деревьев в мире нет — тень мерить не на чем"
     ground = soil > 0
-    under, open_ = ground_light[shade & ground], ground_light[(~shade) & ground]
+    under = ground_light[under_crown & ground]
+    open_ = ground_light[(~under_crown) & ground]
     assert under.size and open_.size
-    assert under.mean() < 0.8 * open_.mean(), (under.mean(), open_.mean())
+    assert under.mean() < 0.75 * open_.mean(), (under.mean(), open_.mean())
 
 
 def test_animals_stay_on_the_ground(run):
@@ -145,7 +147,10 @@ def test_soil_slides_into_hollows():
     low = np.zeros(stone0.size, bool); low[order[:q]] = True
     high = np.zeros(stone0.size, bool); high[order[-q:]] = True
     low = low.reshape(stone0.shape); high = high.reshape(stone0.shape)
-    assert soil[low].mean() > soil[high].mean() + 1.0, (soil[low].mean(), soil[high].mean())
+    # порог относительный: слой почвы на старте тонкий (гора не должна тонуть в
+    # равнине), и абсолютная разница «на клетку» тут больше ничего не значит
+    assert soil[low].mean() > 3 * soil[high].mean(), (soil[low].mean(), soil[high].mean())
+    assert soil[low].mean() > 0.5
     moss2d = (np.asarray(st["species"]) == MOSS).any(axis=2)
     assert moss2d[high].mean() > moss2d[low].mean()
 
@@ -244,18 +249,27 @@ def test_soil_does_not_jitter_on_flat_ground():
     только там, где перенос выравнивает столбцы."""
     R, cfg, st, _ = world(n=48, gens=150, seed=20260902)
     xp, corr, _ = get_backend(False)
-    stone = np.asarray(st["stone_h"])
-    flat = stone <= stone.min() + 1              # ровное дно, склона нет вовсе
-    assert flat.sum() > 100
     moved = 0
     net = np.zeros_like(np.asarray(st["soil_h"]))
     for g in range(1, 21):
         prev = np.asarray(st["soil_h"]).copy()
+        stone_prev = np.asarray(st["stone_h"]).copy()
+        surf = stone_prev + prev
+        # ровное место считаем по ТЕКУЩЕЙ поверхности: колода от погибшего
+        # дерева — настоящий бугор, и сползание с него законно
+        level = np.ones_like(surf, dtype=bool)
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            level &= np.roll(surf, (dx, dy), (0, 1)) == surf
+        level[0], level[-1], level[:, 0], level[:, -1] = False, False, False, False
+        assert level.sum() > 100
         R.step(st, cfg, xp, corr, 200 + g)
         d = np.asarray(st["soil_h"]) - prev
+        # колода от погибшего дерева накрывает почву камнем — это не дрожь,
+        # а событие; такие столбцы из проверки исключаем
+        logged = np.asarray(st["stone_h"]) != stone_prev
         moved += int((d != 0).sum())
         net += d
-        assert not (d != 0)[flat].any(), "почва шевелится на ровном дне"
+        assert not (d != 0)[level & ~logged].any(), "почва шевелится на ровном месте"
     if moved:
         # дрожь — это когда перемещений много, а чистого переноса нет
         assert np.abs(net).sum() / moved > 0.15, "почва ходит туда-сюда вместо сползания"
@@ -463,3 +477,131 @@ def test_default_rescue_is_modest():
     """По умолчанию пустая ниша ускоряет возврат в 10 раз, не в 60: иначе
     вымираний не видно вовсе."""
     assert get_rules("slope").Config().mutate_rescue == 10.0
+
+
+# --- рацион, колода, рельеф, случайные гены ---------------------------------
+
+def test_herbivore_does_not_eat_moss():
+    """Мох — не корм, а порода: он точит камень и готовит почву. Раньше добычей
+    считалось всё, что ярусом ниже, и травоядные паслись на камнях."""
+    R = get_rules("slope")
+    cfg = R.make_config(n=16, seed_world=7, seed_animals=0.0, seed_tree=0.0,
+                        seed_density=0.0, mutate_rate=0.0, soil_slide=0.0,
+                        erode_rate=0.0, p_shock=0.0)
+    # снимаем со мха броню: защищать его должен РАЦИОН, а не удачный бросок
+    g = np.asarray(cfg.genomes).copy()
+    g[MOSS - 1, IDX["armor"]] = 0.0
+    g[HERB - 1, IDX["hunt"]] = 1.0
+    cfg.genomes = g
+    xp, corr, _ = get_backend(False)
+    st, _ = R.init_state(cfg, xp)
+    sp = np.zeros_like(np.asarray(st["species"]))
+    en = np.zeros_like(np.asarray(st["energy"]))
+    stone, soil = np.asarray(st["stone_h"]), np.asarray(st["soil_h"])
+    surf = stone + soil
+    bare = np.argwhere(soil == 0)
+    assert len(bare) > 4
+    for x, y in bare[:6]:                      # полянка мха на голом камне
+        sp[x, y, int(surf[x, y])] = MOSS
+        en[x, y, int(surf[x, y])] = 8.0
+    x, y = bare[0]
+    zw = int(surf[x, y]) + 1
+    sp[x, y, zw] = HERB                        # травоядное стоит прямо на мху
+    en[x, y, zw] = 40.0
+    st["species"], st["energy"] = xp.asarray(sp), xp.asarray(en)
+    before = int((np.asarray(st["species"]) == MOSS).sum())
+    for g in range(1, 120):
+        R.step(st, cfg, xp, corr, g)
+    after = int((np.asarray(st["species"]) == MOSS).sum())
+    assert after >= before, f"мха было {before}, стало {after} — его съели"
+
+
+def test_dead_tree_leaves_a_log_of_stone():
+    """Погибшее дерево кладёт на свой столбец колоду: почва накрыта, растениям
+    там места нет, и переработать её может только мох."""
+    R = get_rules("slope")
+    cfg = R.make_config(n=16, seed_world=3, seed_animals=0.0, seed_tree=0.0,
+                        seed_density=0.0, mutate_rate=0.0, soil_slide=0.0)
+    xp, corr, _ = get_backend(False)
+    st, _ = R.init_state(cfg, xp)
+    stone0, soil0 = np.asarray(st["stone_h"]).copy(), np.asarray(st["soil_h"]).copy()
+    x, y = map(int, np.argwhere(soil0 > 0)[0])
+    assert soil0[x, y] > 0
+    sp = np.zeros_like(np.asarray(st["species"]))
+    en = np.zeros_like(np.asarray(st["energy"]))
+    z0 = int(stone0[x, y] + soil0[x, y])
+    trunk = int(cfg.genomes[TREE - 1][IDX["trunk"]])
+    for k in range(trunk + 2):
+        sp[x, y, z0 + k] = TREE
+        en[x, y, z0 + k] = 30.0
+    st["species"], st["energy"] = xp.asarray(sp), xp.asarray(en)
+    R.step(st, cfg, xp, corr, 1)
+    en = np.asarray(st["energy"]).copy()
+    en[x, y, z0] = -1000.0                     # дерево гибнет от голода
+    st["energy"] = xp.asarray(en)
+    R.step(st, cfg, xp, corr, 2)
+    assert int((np.asarray(st["species"]) == TREE).sum()) == 0
+    assert int(np.asarray(st["soil_h"])[x, y]) == 0, "почва осталась открытой"
+    assert int(np.asarray(st["stone_h"])[x, y]) > int(stone0[x, y]), "колоды нет"
+
+
+def test_moss_turns_a_log_back_into_soil():
+    """Круг замыкается: лес → колода → камень → мох → почва."""
+    R = get_rules("slope")
+    cfg = R.make_config(n=16, seed_world=3, seed_animals=0.0, seed_tree=0.0,
+                        seed_density=0.0, mutate_rate=0.0, soil_slide=0.0)
+    xp, corr, _ = get_backend(False)
+    st, _ = R.init_state(cfg, xp)
+    stone = np.asarray(st["stone_h"])
+    x, y = map(int, np.argwhere(np.asarray(st["soil_h"]) == 0)[0])
+    sp = np.zeros_like(np.asarray(st["species"]))
+    en = np.zeros_like(np.asarray(st["energy"]))
+    z = int(stone[x, y])
+    sp[x, y, z] = MOSS
+    en[x, y, z] = 10.0
+    st["species"], st["energy"] = xp.asarray(sp), xp.asarray(en)
+    st["wet"] = xp.ones((cfg.n, cfg.n), dtype=xp.float32)
+    for g in range(1, 3000):
+        R.step(st, cfg, xp, corr, g)
+        if int(np.asarray(st["soil_h"])[x, y]) > 0:
+            break
+    else:
+        raise AssertionError("мох не сделал почву за 3000 поколений")
+
+
+def test_the_hill_is_not_buried_in_the_plain():
+    """Почва на старте лежит ТОНКИМ слоем: при трёх клетках подножие горы
+    тонуло в равнине и гора выглядела наполовину закопанной."""
+    R = get_rules("slope")
+    cfg = R.make_config(n=64, seed_world=20260825)
+    xp, _, _ = get_backend(False)
+    st, _ = R.init_state(cfg, xp)
+    stone, soil = np.asarray(st["stone_h"]), np.asarray(st["soil_h"])
+    plain = stone <= stone.min() + 1
+    sunk = int(np.median((stone + soil)[plain])) - int(stone.min())
+    assert sunk <= 1, f"подножие утоплено на {sunk} клеток"
+
+
+def test_role_genes_are_off_limits_to_the_random_button():
+    """Роль, подложка и форма роста случайными не бывают: мох со стволом 9 —
+    это не «другой мох», это сломанный мир. Список движок отдаёт и клиенту."""
+    R = get_rules("slope")
+    cfg = R.make_config(n=32)
+    fixed = R.fixed_genes(cfg)
+    for name in ("trophic", "speed", "substrate", "trunk"):
+        assert name in fixed, name
+    assert R.to_json(cfg)["fixed_genes"] == list(fixed)
+    before = np.asarray(cfg.genomes).copy()
+    after = R.randomize(cfg, np.random.default_rng(1))
+    for name in fixed:
+        assert np.array_equal(before[:, IDX[name]], after[:, IDX[name]]), name
+    assert not np.array_equal(before[:, IDX["light"]], after[:, IDX["light"]])
+
+
+def test_client_random_button_respects_the_fixed_list():
+    """Кнопка в панели должна брать список у движка, а не знать свой."""
+    html = (Path(__file__).resolve().parents[1] / "life_cube" / "viewers" / "web"
+            / "static" / "index.html").read_text()
+    i = html.index("btnRandom')")
+    chunk = html[i:i + 1200]
+    assert "fixed_genes" in chunk, "кнопка не спрашивает движок"
