@@ -88,6 +88,15 @@
   <div id="hud"></div>
 </div>
 <div id="side">
+  <h3>Симуляция</h3>
+  <div class="row">
+    <button id="btnSimStart">Запустить</button>
+    <button id="btnSimStop">Остановить</button>
+    <span class="muted" id="simState">…</span>
+  </div>
+  <div class="row muted" id="simHint">Пока симуляция остановлена, мир не создан и видеокарта свободна.
+    Симуляция всегда одна: все вкладки смотрят на неё же.</div>
+
   <h3>Движок</h3>
   <div class="row"><select id="engineSel"></select></div>
   <div class="row muted" id="engineSummary"></div>
@@ -259,6 +268,7 @@ const S = {   // состояние вьюера (window.viewer читает/п�
   clipZ: 1e9, slab: 0, speciesMask: new Array(256).fill(1), colorMode: 'species',
   minSize: 1, ghost: true, selected: 0, showStone: true, showSoil: true, showWater: true,
   paused: false, rate: 0, measured: 0, frames: 0, connected: false, autoHz: true,
+  simRunning: false,
 };
 const $ = id => document.getElementById(id);
 
@@ -445,6 +455,13 @@ function draw(){
   }
   S.frames++;
   const extra = (S.stride>1?`   показана 1/${S.stride} клеток`:'') + (S.componentsOn===false?'   организмы не считаются (большой мир)':'');
+  // остановленная симуляция: на экране остаётся последний кадр, но цифры в
+  // HUD уже ни к чему не относятся — мира на сервере нет
+  if (!S.simRunning){
+    $('hud').textContent = 'СИМУЛЯЦИЯ ОСТАНОВЛЕНА — нажми «Запустить»' +
+      (S.gen ? `\nпоследний кадр: поколение ${S.gen}, живых ${S.k}` : '');
+    return;
+  }
   $('hud').textContent = `поколение ${S.gen}   живых ${S.k}${S.stride>1?'×'+S.stride:''}   ${S.paused?'ПАУЗА':(S.measured.toFixed(1)+' пок/с')}   кадр ${S.snapshotMs||0} мс` +
     `\nвиды ${S.nsp>10 ? (S.pops.filter(p=>p>0).length+' живых, крупнейшие '+S.pops.map((p,i)=>[p,i+1]).filter(x=>x[0]>0).sort((a,b)=>b[0]-a[0]).slice(0,6).map(x=>'#'+x[1]+':'+x[0]).join(' ')) : S.pops.join(' / ')}   организмов ${S.comps.length}${S.selected?'   выделен #'+S.selected:''}${extra}`;
 }
@@ -553,7 +570,9 @@ function connect(){
   const url=(location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws';
   ws=new WebSocket(url); ws.binaryType='arraybuffer';
   ws.onmessage=e=>{ if (typeof e.data==='string'){
-      try { const m=JSON.parse(e.data); if (m.config){ applyConfig(m.config); $('status').textContent='конфиг обновлён'; return; }
+      try { const m=JSON.parse(e.data); if (m.sim){ applySim(m.sim); return; }
+            if (m.ok && m.ok.running !== undefined){ applySim(m.ok); return; }
+            if (m.config){ applyConfig(m.config); $('status').textContent='конфиг обновлён'; return; }
             if (m.ok){ labSay(m.ok.forked ? `ответвлён вид #${m.ok.forked}: ${m.ok.cells} клеток перекрашено` : 'готово'); return; }
             if (m.error){ $('status').textContent='ошибка: '+m.error; $('status').style.color='#f2683c';
                           labSay('ошибка: '+m.error, true); return; } } catch(err){}
@@ -562,6 +581,23 @@ function connect(){
   ws.onopen=()=>{ $('status').textContent='подключено'; };
   ws.onclose=()=>{ $('status').textContent='нет связи, переподключение…'; S.connected=false; setTimeout(connect,1500); };
 }
+// состояние жизненного цикла симуляции. Симуляция одна на сервер: остановил
+// в одной вкладке — остановилась у всех, поэтому состояние приходит с сервера,
+// а не хранится в каждом клиенте отдельно
+function applySim(s){
+  S.simRunning = !!s.running;
+  $('btnSimStart').classList.toggle('on', S.simRunning);
+  $('btnSimStop').classList.toggle('on', !S.simRunning);
+  $('btnSimStart').disabled = S.simRunning;
+  $('btnSimStop').disabled = !S.simRunning;
+  $('simState').textContent = S.simRunning
+    ? `идёт (${s.engine}, ${s.n}³${s.gpu ? ', GPU' : ''})`
+    : `остановлена (${s.engine}, ${s.n}³)`;
+  if (!S.simRunning){ $('hud').textContent = 'симуляция остановлена — нажми «Запустить»'; }
+  dirty = true;
+}
+$('btnSimStart').onclick = ()=>{ $('status').textContent='запускаю симуляцию…'; send({cmd:'sim_start'}); };
+$('btnSimStop').onclick  = ()=>{ $('status').textContent='останавливаю симуляцию…'; send({cmd:'sim_stop'}); };
 if (location.protocol!=='file:') connect();
 
 // --------------------------------------------------- конструктор существ

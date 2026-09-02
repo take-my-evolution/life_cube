@@ -127,8 +127,20 @@ def decode_snapshot(buf: bytes):
 class WebViewer:
     MAX_N = 256          # выше этого куб не даём создать из браузера
 
-    def __init__(self, engine: Engine, fps=25.0, components_hz=2.0, max_n=256):
+    def __init__(self, engine: Engine = None, fps=25.0, components_hz=2.0, max_n=256,
+                 rules="ecology", cfg=None, sim_kw=None):
+        # Симуляция — управляемый ресурс, а не то, что живёт всегда: пока она
+        # остановлена, `self.engine` равен None, мира нет и видеопамять не
+        # занята. «Рецепт» мира (движок + Config) живёт ОТДЕЛЬНО от самого
+        # мира: Config ничего не выделяет, куб выделяет только init_state
+        # внутри Engine. Поэтому панель конструктора работает и на
+        # остановленной симуляции, а Запустить собирает мир по этому рецепту.
         self.engine = engine
+        self.rules_name = engine.rules.name if engine is not None else str(rules)
+        self.cfg = engine.cfg if engine is not None else cfg
+        self._sim_kw = dict(sim_kw or {})
+        self._sim_thread = None     # поток симуляции, если его завели МЫ
+        self._simlock = threading.Lock()
         self.MAX_N = int(max_n)
         self.fps = fps                 # верхний предел снимков в секунду
         self.components_hz = components_hz   # как часто пересчитывать организмы
@@ -140,7 +152,80 @@ class WebViewer:
         self.latest_sound = None
         self._sent = {}            # что клиентам уже отправлено (рельеф, имена)
         self._heavy_task = None    # фоновая разметка организмов (см. broadcaster)
-        engine.on_snapshot(self._on_snapshot)
+        if engine is not None:
+            engine.on_snapshot(self._on_snapshot)
+
+    # --- жизненный цикл симуляции -------------------------------------------
+    @property
+    def running(self):
+        return self.engine is not None
+
+    def sim_state(self):
+        e = self.engine
+        return {"running": e is not None,
+                "engine": self.rules_name,
+                "n": int(self.cfg.n) if self.cfg is not None else 0,
+                "gpu": bool(e.on_gpu) if e is not None else None,
+                "gen": int(e.gen) if e is not None else 0}
+
+    def start_sim(self):
+        """Собрать мир и запустить поток симуляции. Идемпотентно: одновременно
+        живёт РОВНО ОДНА симуляция — второй вызов ничего не делает."""
+        with self._simlock:
+            if self.engine is not None:
+                return self.sim_state()
+            if self.cfg is None:
+                self.cfg = get_rules(self.rules_name).Config()
+            eng = Engine(self.cfg, rules=self.rules_name, **self._sim_kw)
+            eng.on_snapshot(self._on_snapshot)
+            self.engine = eng
+            self.mapper = SoundMapper()
+            self._sent = {}
+            th = threading.Thread(target=eng.run, daemon=True, name="life-cube-sim")
+            self._sim_thread = th
+            th.start()
+        self._push_sim()
+        self._push_config()
+        return self.sim_state()
+
+    def stop_sim(self):
+        """Остановить симуляцию и отпустить мир вместе с видеопамятью.
+        Настройки (движок, Config с геномами) переживают остановку — Запустить
+        соберёт мир по ним же."""
+        with self._simlock:
+            eng, th = self.engine, self._sim_thread
+            if eng is None:
+                return self.sim_state()
+            self.rules_name = eng.rules.name
+            self.cfg = eng.cfg
+            self.engine = None
+            self._sim_thread = None
+            eng.stop()
+        if th is not None:
+            th.join(timeout=3.0)
+        eng.release()
+        self.latest = None
+        self.latest_sound = None
+        self._sent = {}
+        self._push_sim()
+        return self.sim_state()
+
+    def _push_sim(self):
+        """Разослать зрителям состояние симуляции (идёт / остановлена)."""
+        if self.loop is None or not self.clients:
+            return
+        msg = json.dumps({"sim": self.sim_state()}, ensure_ascii=False)
+
+        async def send():
+            for ws in list(self.clients):
+                try:
+                    await ws.send_str(msg)
+                except Exception:
+                    self.clients.discard(ws)
+        try:
+            asyncio.run_coroutine_threadsafe(send(), self.loop)
+        except Exception:
+            pass
 
     # вызывается из потока симуляции
     def _on_snapshot(self, snap):
@@ -171,23 +256,32 @@ class WebViewer:
         видимого стопора. Ценой того, что кадр с организмами может на пару
         поколений отстать от геометрии — на населении, которое меняется на
         доли процента за 80мс, это незаметно."""
-        pull = self.engine.snapshot_every <= 0
         last_gen = -1
         last_sent = None
         every = max(1, int(round(self.fps / max(self.components_hz, 1e-6))))
         tick = 0
         while True:
-            if pull:
+            e = self.engine
+            # симуляция остановлена: мира нет, кадрам взяться неоткуда —
+            # просто ждём, пока её запустят из браузера
+            if e is None:
+                await asyncio.sleep(0.2)
+                last_gen = -1
+                continue
+            if e.snapshot_every <= 0:
                 await asyncio.sleep(1.0 / self.fps)
-                if self.clients and not self.engine.busy and self.engine.gen != last_gen:
-                    last_gen = self.engine.gen
+                e = self.engine
+                if e is None:
+                    continue
+                if self.clients and not e.busy and e.gen != last_gen:
+                    last_gen = e.gen
                     tick += 1
-                    self.engine.busy = True
+                    e.busy = True
                     try:
                         await asyncio.get_running_loop().run_in_executor(
-                            None, lambda: self.engine.publish(force=True, components=False))
+                            None, lambda: e.publish(force=True, components=False))
                     finally:
-                        self.engine.busy = False
+                        e.busy = False
                     # организмы — своим фоновым темпом, не в этом такте
                     if (tick % every == 0
                             and (self._heavy_task is None or self._heavy_task.done())):
@@ -218,9 +312,12 @@ class WebViewer:
         """Фоновая разметка организмов — см. broadcaster(). Ошибку глотаем:
         одна неудачная разметка не должна ронять поток кадров, следующая
         попытка придёт через components_hz."""
+        e = self.engine
+        if e is None:
+            return
         try:
             await asyncio.get_running_loop().run_in_executor(
-                None, lambda: self.engine.publish(force=True, components=True))
+                None, lambda: e.publish(force=True, components=True))
         except Exception:
             pass
 
@@ -228,9 +325,20 @@ class WebViewer:
         from aiohttp import web, WSMsgType
         ws = web.WebSocketResponse(max_msg_size=64 * 1024 * 1024)
         await ws.prepare(request)
-        snap = self.latest or self.engine.publish(force=True)
-        snap.config_json = self._config_json()
-        await ws.send_bytes(encode_snapshot(snap, first=True, sound=self.latest_sound))
+        # состояние симуляции — первым делом: на остановленной симуляции кадров
+        # не будет вовсе, и без этого зритель не узнал бы, что происходит
+        await ws.send_str(json.dumps({"sim": self.sim_state()}, ensure_ascii=False))
+        e = self.engine
+        snap = self.latest or (e.publish(force=True) if e is not None else None)
+        if snap is not None:
+            snap.config_json = self._config_json()
+            await ws.send_bytes(encode_snapshot(snap, first=True, sound=self.latest_sound))
+        else:
+            # мира нет, но панель конструктора нужна и на остановленной
+            # симуляции: по этому же рецепту её и запустят
+            cj = self._config_json()
+            if cj:
+                await ws.send_str(json.dumps({"config": cj}, ensure_ascii=False))
         self._sent = {}            # новый зритель — следующий общий кадр полный
         self.clients.add(ws)
         try:
@@ -259,8 +367,39 @@ class WebViewer:
         return ws
 
     def handle(self, cmd):
-        e = self.engine
         c = cmd.get("cmd")
+        # --- жизненный цикл: единственные команды, которым мир не нужен -----
+        if c == "sim_start":
+            return self.start_sim()
+        if c == "sim_stop":
+            return self.stop_sim()
+        if c == "sim_state":
+            return self.sim_state()
+        e = self.engine
+        if e is None:
+            # Пока симуляция остановлена, менять можно только РЕЦЕПТ мира —
+            # это чистая правка Config, она ничего не выделяет. Всё остальное
+            # требует живого мира и честно об этом говорит.
+            if c == "engine":
+                name = str(cmd.get("value"))
+                n = int(cmd.get("n", self.cfg.n if self.cfg is not None else 128))
+                if n > self.MAX_N:
+                    raise ValueError(f"предел {self.MAX_N}³")
+                rules = get_rules(name)
+                self.rules_name = name
+                self.cfg = rules.Config(n=n)
+                self._push_config()
+                return {"engine": name, "n": n, "running": False}
+            if c == "world" and self.cfg is not None:
+                for k, v in dict(cmd.get("value") or {}).items():
+                    if hasattr(self.cfg, k) and k != "genomes":
+                        setattr(self.cfg, k, type(getattr(self.cfg, k))(v))
+                self._push_config()
+                return {"world": True, "running": False}
+            if c == "config":
+                self._push_config()
+                return {"running": False}
+            raise ValueError("симуляция остановлена — нажми «Запустить»")
         if c == "pause":
             e.pause()
         elif c == "resume":
@@ -344,8 +483,17 @@ class WebViewer:
     def _config_json(self):
         """Конфиг движка + то, что знает о движке оркестровка: умеет ли он
         ответвлять виды и как объясняются его гены (для лаборатории генома)."""
-        rules = self.engine.rules
-        j = rules.to_json(self.engine.cfg, self.engine.state)
+        e = self.engine
+        rules = e.rules if e is not None else get_rules(self.rules_name)
+        cfg = e.cfg if e is not None else self.cfg
+        if cfg is None:
+            return None
+        try:
+            # на остановленной симуляции состояния мира нет — движки, которые
+            # умеют обойтись одним Config, всё равно отдадут панель
+            j = rules.to_json(cfg, e.state if e is not None else None)
+        except Exception:
+            return None
         j["can_fork"] = bool(getattr(rules, "can_fork", False))
         j["gene_docs"] = rules.gene_docs()
         return j
@@ -382,22 +530,24 @@ class WebViewer:
 
 
 def serve(cfg=None, use_gpu=False, host="0.0.0.0", port=8765, rate=0.0,
-          snapshot_every=0, components=True, autostart=True, fps=25.0,
+          snapshot_every=0, components=True, autostart=False, fps=25.0,
           components_hz=2.0, yield_ms=0.5, max_n=256, max_cells=400_000,
           rules="ecology"):
-    """Поднять движок в фоновом потоке и веб-сервер в текущем."""
+    """Поднять веб-сервер. Мир по умолчанию НЕ создаётся: сервис поднимается
+    мгновенно и не держит видеокарту, пока симуляцию не запустят из браузера
+    (`autostart=True` / `--autostart` возвращает старое поведение)."""
     from aiohttp import web
-    engine = Engine(cfg, use_gpu=use_gpu, rate=rate,
-                    snapshot_every=snapshot_every, components=components,
-                    yield_ms=yield_ms, max_cells=max_cells, rules=rules)
-    if not autostart:
-        engine.pause()
-    viewer = WebViewer(engine, fps=fps, components_hz=components_hz, max_n=max_n)
-    th = threading.Thread(target=engine.run, daemon=True, name="life-cube-sim")
-    th.start()
+    sim_kw = dict(use_gpu=use_gpu, rate=rate, snapshot_every=snapshot_every,
+                  components=components, yield_ms=yield_ms, max_cells=max_cells)
+    viewer = WebViewer(None, fps=fps, components_hz=components_hz, max_n=max_n,
+                       rules=rules, cfg=cfg, sim_kw=sim_kw)
+    if autostart:
+        viewer.start_sim()
+    n = viewer.cfg.n if viewer.cfg is not None else get_rules(rules).Config().n
     print(f"life-cube web viewer: http://{host}:{port}/  "
-          f"(движок {engine.rules.name}, куб {engine.cfg.n}³, {'GPU' if engine.on_gpu else 'CPU'})", flush=True)
+          f"(движок {rules}, куб {n}³, симуляция "
+          f"{'запущена' if autostart else 'остановлена — запусти из браузера'})", flush=True)
     try:
         web.run_app(viewer.make_app(), host=host, port=port, print=None)
     finally:
-        engine.stop()
+        viewer.stop_sim()

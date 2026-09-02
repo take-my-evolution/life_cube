@@ -342,3 +342,19 @@ class Engine:
     def stop(self):
         self.running = False
         self._wake.set()
+
+    def release(self):
+        """Отпустить мир и видеопамять. Движок после этого непригоден —
+        зовётся, когда симуляцию останавливают совсем (см. WebViewer.stop_sim):
+        пока состояние живо, куб занимает видеопамять, даже если никто не
+        считает ни одного поколения."""
+        self.stop()
+        with self._lock:
+            self.state = None
+            self.last_snapshot = None
+            self.listeners = []
+            if self.on_gpu:
+                try:
+                    self.xp.get_default_memory_pool().free_all_blocks()
+                except Exception:
+                    pass

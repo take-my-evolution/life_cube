@@ -61,6 +61,10 @@ def build_parser():
     s.add_argument("--no-components", action="store_true",
                    help="не считать организмы (быстрее)")
     s.add_argument("--paused", action="store_true", help="стартовать на паузе")
+    s.add_argument("--autostart", action="store_true",
+                   help="создать мир и запустить симуляцию сразу при старте сервиса "
+                        "(по умолчанию мира нет и видеокарта свободна, пока симуляцию "
+                        "не запустят из браузера)")
     return p
 
 
@@ -90,7 +94,7 @@ def run_cli(argv=None):
             n=a.n, seed_world=a.seed_world, seed_mut=a.seed_mut)
         serve(cfg, rules=a.engine, use_gpu=a.gpu, host=a.host, port=a.port, rate=a.rate,
               snapshot_every=a.snapshot_every, components=not a.no_components,
-              autostart=not a.paused, fps=a.fps, components_hz=a.components_hz, yield_ms=a.yield_ms,
+              autostart=a.autostart, fps=a.fps, components_hz=a.components_hz, yield_ms=a.yield_ms,
               max_n=a.max_n, max_cells=a.max_cells)
         return None
 

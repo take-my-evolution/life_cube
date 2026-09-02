@@ -28,7 +28,12 @@ def _free_port():
 def server():
     from aiohttp import web
     cfg = Config(n=24, seed_density=0.05)
-    engine = Engine(cfg, rate=0, components=True)
+    # rate=60, а не 0 (без предела): test_controls_reach_engine снимает паузу
+    # на 0.4 с, и на неограниченной скорости под нагрузкой это успевало
+    # прокрутить тысячи поколений — мир вымирал (с появлением дождя это стало
+    # возможно), и следующий тест звука видел пустой мир. Плавающее падение
+    # ровно в полном прогоне, поодиночке тест всегда проходил.
+    engine = Engine(cfg, rate=60, components=True)
     engine.run(max_gens=25)          # немного жизни, потом на паузу
     engine.pause()
     viewer = WebViewer(engine)
