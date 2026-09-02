@@ -56,6 +56,7 @@ class Engine:
         self.max_cells = int(max_cells)     # столько живых клеток шлём зрителю
         self.snapshot_seconds = 0.0         # сколько занял последний снимок
         self.busy = False                   # снимок уже считается
+        self._snap_pending = 0              # сколько потоков ждут снимка
         self.reseeds = 0                    # сколько раз мир подсевали
         self.last_reseed_gen = None
         self.publish(force=True)
@@ -195,13 +196,21 @@ class Engine:
         # чтобы симуляция не ждала CPU
         t_start = time.perf_counter()
         heightmaps = getattr(self.rules, "heightmaps", False)
-        with self._lock:
-            gen = self.gen
-            cpu = {"species": to_cpu(self.state["species"]).copy(),
-                   # при картах высот почва не нужна поклеточно
-                   "soil": (np.zeros((1, 1, 1), bool) if heightmaps
-                            else to_cpu(self.state["soil"]).copy())}
-            n_species = self.rules.n_species(self.cfg)
+        # Заявляем о себе ДО того, как встать в очередь за замком: цикл
+        # симуляции увидит заявку и уступит (см. run). Без этого на мире, где
+        # шаг дольше бюджета скорости, замок из цикла не выходит вовсе и
+        # снимок ждёт секундами — в браузере это выглядит как зависший кадр.
+        self._snap_pending += 1
+        try:
+            with self._lock:
+                gen = self.gen
+                cpu = {"species": to_cpu(self.state["species"]).copy(),
+                       # при картах высот почва не нужна поклеточно
+                       "soil": (np.zeros((1, 1, 1), bool) if heightmaps
+                                else to_cpu(self.state["soil"]).copy())}
+                n_species = self.rules.n_species(self.cfg)
+        finally:
+            self._snap_pending -= 1
         want = self.components if components is None else (components and self.components)
         if want and self.cfg.n ** 3 > self.COMPONENTS_CELL_LIMIT:
             want = False                    # слишком большой мир — без разметки
@@ -344,6 +353,12 @@ class Engine:
                 t_prev = t0
                 self.advance()
                 self.publish()
+                # Уступаем тем, кто ждёт снимка. Шаг может оказаться дольше
+                # бюджета скорости (тяжёлый мир, высокая целевая скорость) —
+                # тогда ждать нечего, и раньше цикл тут же забирал замок
+                # обратно: наблюдатель не получал кадр вовсе, симуляция шла, а
+                # интерфейс стоял на давнем поколении (жалоба на «10 пок/с»).
+                self._yield_to_snapshot()
                 if self.rate > 0 and not want_step:
                     budget = 1.0 / self.rate - (time.perf_counter() - t0)
                     if budget > 0:
@@ -353,6 +368,16 @@ class Engine:
                     time.sleep(self.yield_ms / 1000.0)
         finally:
             self.running = False
+
+    SNAP_YIELD_MAX = 1.0        # дольше секунды снимку не уступаем
+
+    def _yield_to_snapshot(self):
+        """Дать дождаться тем, кто уже встал в очередь за снимком."""
+        if not self._snap_pending:
+            return
+        t0 = time.perf_counter()
+        while self._snap_pending and time.perf_counter() - t0 < self.SNAP_YIELD_MAX:
+            time.sleep(0.001)
 
     def stop(self):
         self.running = False
