@@ -185,3 +185,90 @@ def test_predator_eats_adjacent_prey():
             break
     else:
         raise AssertionError("хищник за 60 поколений не съел соседа")
+
+
+def test_a_hungry_animal_does_not_always_step_the_same_way():
+    """Жалоба: «существа текут в одном направлении, как река».
+
+    Шум в оценке направления был МНОЖИТЕЛЕМ поля добычи и потому исчезал ровно
+    там, где поле пустое, — а это единственное место, где случайный ход и
+    нужен. Все ничьи разрешались первым направлением списка, и зверь, не
+    видящий добычи, каждый шаг шагал строго в +x.
+    """
+    R = get_rules("slope")
+    cfg = R.make_config(n=24, seed_world=4, seed_animals=0.0, seed_tree=0.0,
+                        seed_density=0.0)
+    xp, corr, _ = get_backend(False)
+    seen = set()
+    for trial in range(12):
+        st, _ = R.init_state(cfg, xp)
+        sp = np.zeros_like(np.asarray(st["species"]))
+        en = np.zeros_like(np.asarray(st["energy"]))
+        surf = np.asarray(st["stone_h"]) + np.asarray(st["soil_h"])
+        x, y = 12, 12                       # один зверь, добычи в мире нет вовсе
+        sp[x, y, int(surf[x, y])] = PRED
+        en[x, y, int(surf[x, y])] = 50.0
+        st["species"], st["energy"] = xp.asarray(sp), xp.asarray(en)
+        st["rng"] = xp.random.default_rng(trial)
+        cfg.seed_mut = 1000 + trial
+        R.step(st, cfg, xp, corr, trial)
+        where = np.argwhere(np.asarray(st["species"]) == PRED)
+        if len(where):
+            seen.add((int(where[0][0]) - x, int(where[0][1]) - y))
+    assert len(seen) > 1, f"голодный зверь всегда идёт в одну сторону: {seen}"
+
+
+def test_soil_does_not_jitter_on_flat_ground():
+    """Жалоба: «земля бурлит». Единица почвы, уехавшая при перепаде 1, делает
+    перепад −1 — и на следующем шаге едет обратно. Почва должна двигаться
+    только там, где перенос выравнивает столбцы."""
+    R, cfg, st, _ = world(n=48, gens=150, seed=20260902)
+    xp, corr, _ = get_backend(False)
+    stone = np.asarray(st["stone_h"])
+    flat = stone <= stone.min() + 1              # ровное дно, склона нет вовсе
+    assert flat.sum() > 100
+    moved = 0
+    net = np.zeros_like(np.asarray(st["soil_h"]))
+    for g in range(1, 21):
+        prev = np.asarray(st["soil_h"]).copy()
+        R.step(st, cfg, xp, corr, 200 + g)
+        d = np.asarray(st["soil_h"]) - prev
+        moved += int((d != 0).sum())
+        net += d
+        assert not (d != 0)[flat].any(), "почва шевелится на ровном дне"
+    if moved:
+        # дрожь — это когда перемещений много, а чистого переноса нет
+        assert np.abs(net).sum() / moved > 0.15, "почва ходит туда-сюда вместо сползания"
+
+
+def test_crown_falls_when_the_trunk_is_gone():
+    """Крона держится на стволе. Съели ствол снизу — крона обваливается тем же
+    шагом, а не висит зелёными кубами в воздухе."""
+    R = get_rules("slope")
+    cfg = R.make_config(n=16, seed_world=2, seed_animals=0.0, seed_tree=0.0,
+                        seed_density=0.0)
+    xp, corr, _ = get_backend(False)
+    st, _ = R.init_state(cfg, xp)
+    sp = np.asarray(st["species"]).copy()
+    en = np.asarray(st["energy"]).copy()
+    surf = np.asarray(st["stone_h"]) + np.asarray(st["soil_h"])
+    sp[:] = 0
+    x, y = 8, 8
+    z0 = int(surf[x, y])
+    trunk = int(cfg.genomes[TREE - 1][IDX["trunk"]])
+    for k in range(trunk + 2):                    # ствол и пара клеток кроны
+        sp[x, y, z0 + k] = TREE
+        en[x, y, z0 + k] = 20.0
+    sp[x + 1, y, z0 + trunk + 1] = TREE           # ветка вбок
+    en[x + 1, y, z0 + trunk + 1] = 20.0
+    st["species"], st["energy"] = xp.asarray(sp), xp.asarray(en)
+    R.step(st, cfg, xp, corr, 1)
+    assert int((np.asarray(st["species"]) == TREE).sum()) > 3, "дерево не устояло целым"
+
+    sp = np.asarray(st["species"]).copy()
+    sp[x, y, z0] = 0                              # ствол подъели у земли
+    st["species"] = xp.asarray(sp)
+    R.step(st, cfg, xp, corr, 2)
+    left = np.argwhere(np.asarray(st["species"]) == TREE)
+    hanging = [c for c in left if c[2] > surf[c[0], c[1]]]
+    assert not hanging, f"в воздухе осталось {len(hanging)} клеток кроны"

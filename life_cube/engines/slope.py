@@ -93,7 +93,7 @@ class SlopeConfig:
 
     # почва
     soil_slide: float = 0.28        # вероятность, что единица почвы съедет вниз
-    slide_drop: int = 1             # с какого перепада поверхности почва едет
+    slide_drop: int = 2             # с какого перепада поверхности почва едет
     erode_rate: float = 0.02        # базовая скорость превращения камня в почву
 
     # жизнь
@@ -267,6 +267,10 @@ class SlopeRules(Rules):
         return out
 
     DIRS2 = ((1, 0), (-1, 0), (0, 1), (0, -1))
+    # перестановки ходов зверя (четыре стороны и «стоять»): перебирать их
+    # всегда в одном порядке — значит систематически предпочитать первый
+    MOVES = tuple(tuple(p) for p in __import__("itertools").permutations(
+        ((1, 0), (-1, 0), (0, 1), (0, -1), (0, 0))))
 
     def _downhill(self, surface, xp):
         """Куда «вниз» с каждого столбца: индекс направления и перепад."""
@@ -329,7 +333,14 @@ class SlopeRules(Rules):
         # --- 3. почва скатывается вниз по склону ------------------------------
         surface = stone_h + soil_h
         bdir, bdrop = self._downhill(surface, xp)
-        go = (bdrop >= cfg.slide_drop) & (soil_h > 0) & (rng.random((n, n)) < cfg.soil_slide)
+        # Единица почвы, уехавшая при перепаде 1, делает перепад −1: сосед
+        # становится выше, и на следующем шаге та же единица едет обратно. На
+        # ровном дне (где склона нет вовсе) так «кипело» 462 столбца из 2440 за
+        # шаг, а из 15 384 перемещений почвы за 30 шагов чистыми были 1233 —
+        # 92 % движения было дрожью на месте. Порог 2 — это угол естественного
+        # откоса: перенос ровно выравнивает столбцы и обратного хода не создаёт.
+        go = (bdrop >= max(2, int(cfg.slide_drop))) & (soil_h > 0) \
+            & (rng.random((n, n)) < cfg.soil_slide)
         soil_h = soil_h - go.astype(soil_h.dtype)
         for k, (dx, dy) in enumerate(self.DIRS2):
             soil_h = soil_h + self._shift2(
@@ -396,6 +407,31 @@ class SlopeRules(Rules):
         alive = species > 0
         plants = alive & ~is_anim
         idx = xp.clip(species.astype(xp.int32) - 1, 0, N_SPECIES - 1)
+
+        # Крона держится на стволе, а не на воздухе. Ствол съели снизу или он
+        # умер от старости — всё, что было связано с землёй только через него,
+        # обваливается тем же шагом. Иначе в кадре висят зелёные кубы без
+        # опоры: замер на 150 поколении — 22 столбца дерева из 45 вообще без
+        # корня на подложке.
+        trunky = plants & gtrunk[idx]
+        if bool(trunky.any()):
+            hold = trunky & (zz == surface[:, :, None])       # корни на подложке
+            for _ in range(int(np.asarray(cfg.genomes)[:, IDX["trunk"]].max())
+                           + int(round(float(np.asarray(cfg.genomes)[:, IDX["branch"]].max()) * 3)) + 2):
+                grown = hold.copy()
+                grown[:, :, 1:] |= hold[:, :, :-1]            # вверх по стволу
+                for dx, dy in self.DIRS2:                     # вбок по ветвям
+                    grown |= self._shift2(hold, dx, dy, xp)
+                grown = grown & trunky
+                if bool((grown == hold).all()):
+                    break
+                hold = grown
+            fell = trunky & ~hold
+            species = xp.where(fell, xp.uint8(0), species)
+            energy = xp.where(fell, 0.0, energy)
+            alive = species > 0
+            plants = alive & ~is_anim
+            idx = xp.clip(species.astype(xp.int32) - 1, 0, N_SPECIES - 1)
 
         # похороненное подложкой гибнет
         buried = alive & (zz < surface[:, :, None])
@@ -600,6 +636,10 @@ class SlopeRules(Rules):
             # (np.isin по всему столбцу) на каждое из пяти направлений каждого
             # зверя: 8800 вызовов isin за шаг и 90 % времени всего движка.
             # Одна карта на вид — и поиск становится чтением двух чисел.
+            # шум в единицах размаха поля: и на пустом поле, и на насыщенном
+            # он остаётся сопоставим с перепадом, по которому зверь и решает
+            span = float(attract.max() - attract.min())
+            noise_amp = cfg.move_noise * (span if span > 0 else 1.0)
             prey_mask = np.isin(sp, prey_sp) if prey_sp else np.zeros(sp.shape, bool)
             prey_z = np.where(prey_mask.any(axis=2), prey_mask.argmax(axis=2), -1)
             rng_cpu = np.random.default_rng((cfg.seed_mut ^ (s * 7919)) + int(state["gen"]))
@@ -608,7 +648,15 @@ class SlopeRules(Rules):
                     continue
                 for _ in range(speed):
                     best, bx, by = -1e9, x, y
-                    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1), (0, 0)):
+                    # Порядок направлений тасуем, а шум делаем АДДИТИВНЫМ.
+                    # Мультипликативный шум (attract·(1±0.15)) исчезает ровно
+                    # там, где поле добычи пустое, — а это единственное место,
+                    # где случайный ход и нужен: без него все ничьи разрешались
+                    # первым направлением списка, и каждый шестой хищник каждый
+                    # шаг маршировал строго в +x. В кадре это выглядело как
+                    # река из существ, текущая в одну сторону.
+                    order = self.MOVES[rng_cpu.integers(len(self.MOVES))]
+                    for dx, dy in order:
                         nx, ny = x + dx, y + dy
                         if not (0 <= nx < n and 0 <= ny < n):
                             continue
@@ -619,7 +667,7 @@ class SlopeRules(Rules):
                                 continue                    # обрыв: не вскарабкаться
                             if sp[nx, ny, walk[nx, ny]] in anim_sp:
                                 continue                    # занято другим зверем
-                        v = attract[nx, ny] * (1.0 + cfg.move_noise * (rng_cpu.random() * 2 - 1))
+                        v = attract[nx, ny] + noise_amp * (rng_cpu.random() * 2 - 1)
                         if v > best:
                             best, bx, by = v, nx, ny
                     if (bx, by) == (x, y):
