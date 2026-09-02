@@ -102,3 +102,53 @@ def test_serve_does_not_build_a_world_by_default():
     from life_cube.viewers.web.server import serve
     sig = inspect.signature(serve)
     assert sig.parameters["autostart"].default is False
+
+
+def test_config_carries_engine_list_and_size_limit():
+    """Список движков раньше уходил ТОЛЬКО в первом бинарном кадре. На
+    остановленной симуляции кадров нет вовсе, и выпадающий список движков в
+    браузере оставался пустым — выбрать движок было физически нечем.
+    Предел размера куба (--max-n) тоже должен доезжать до клиента: без него
+    ползунок уезжал до 256, сервер молча отказывал, и со стороны это
+    выглядело как «увеличение куба не работает»."""
+    v = _viewer(max_n=224)
+    cj = v._config_json()
+    assert cj["engines"] and {e["name"] for e in cj["engines"]} >= {"ecology", "lichen", "terra"}
+    assert cj["max_n"] == 224
+    # и то же самое на ЗАПУЩЕННОЙ симуляции
+    try:
+        v.start_sim()
+        cj2 = v._config_json()
+        assert cj2["engines"] and cj2["max_n"] == 224
+    finally:
+        v.stop_sim()
+
+
+def test_engine_switch_keeps_viewer_recipe_in_sync():
+    """switch_rules подменяет e.cfg НОВЫМ объектом. Рецепт вьюера должен
+    поехать за ним, иначе Остановить/Запустить пересобирает мир по
+    устаревшему движку и размеру."""
+    v = _viewer()
+    try:
+        v.start_sim()
+        v.handle({"cmd": "engine", "value": "lichen", "n": 32})
+        assert v.rules_name == "lichen" and v.cfg is v.engine.cfg and v.cfg.n == 32
+        v.stop_sim()
+        v.start_sim()
+        assert v.engine.rules.name == "lichen" and v.engine.cfg.n == 32
+    finally:
+        v.stop_sim()
+
+
+def test_world_size_change_reaches_the_engine():
+    """Ползунок размера + «Пересоздать мир»: куб должен реально пересоздаться
+    новым размером, и рецепт вьюера — совпасть с движком."""
+    v = _viewer()
+    try:
+        v.start_sim()
+        assert v.engine.cfg.n == 24
+        v.handle({"cmd": "world", "value": {"n": 40}, "reseed": True})
+        assert v.engine.cfg.n == 40 and v.cfg.n == 40
+        assert v.engine.state["species"].shape == (40, 40, 40)
+    finally:
+        v.stop_sim()

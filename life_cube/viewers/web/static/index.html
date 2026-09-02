@@ -786,7 +786,10 @@ function worldControls(){
       const inp=document.createElement('input'); inp.type='number'; inp.value=w[k]; inp.style.width='90px';
       inp.oninput=e=>{ CFG.world[k]=+e.target.value; }; row.appendChild(inp); box.appendChild(row); continue;
     }
-    const [lo,hi,st]=RNG[k]||[0,1,0.01];
+    let [lo,hi,st]=RNG[k]||[0,1,0.01];
+    // куб не может быть больше, чем разрешает ЭТОТ сервер (--max-n):
+    // иначе ползунок уезжает за предел, а сервер отказывает
+    if (k==='n' && CFG.data.max_n) hi = Math.min(hi, CFG.data.max_n);
     const dec = st<0.001?4:(st<0.05?3:(st<1?2:0));
     row.innerHTML=`<span>${LAB[k]||k}</span><b id="wv_${k}">${(+w[k]).toFixed(dec)}</b>`;
     const inp=document.createElement('input'); inp.type='range'; inp.min=lo; inp.max=hi; inp.step=st; inp.value=w[k];
@@ -834,6 +837,7 @@ $('reseedCount').onchange=()=>sendSeeding(false);
 function applyConfig(cfg){
   const engineChanged = !CFG.data || CFG.data.engine !== cfg.engine;
   CFG.data=cfg;
+  if (cfg.engines) S.engines = cfg.engines;   // список движков приходит с конфигом
   if (engineChanged || !CFG.initial) CFG.initial=JSON.parse(JSON.stringify(cfg.genomes));
   CFG.edited=JSON.parse(JSON.stringify(cfg.genomes));
   CFG.ids = cfg.ids || null;

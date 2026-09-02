@@ -435,6 +435,11 @@ class WebViewer:
                 raise ValueError(f"предел {self.MAX_N}³")
             rules = get_rules(name)
             e.switch_rules(name, rules.Config(n=n))
+            # рецепт вьюера должен смотреть на ТОТ ЖЕ Config, что и движок:
+            # switch_rules подменяет e.cfg новым объектом, и без этой строки
+            # self.cfg оставался прежним — Запустить после Остановить собрал
+            # бы мир по устаревшему движку и размеру
+            self.rules_name, self.cfg = e.rules.name, e.cfg
             self.mapper = SoundMapper()
             self._push_config()
         elif c == "world":
@@ -449,6 +454,7 @@ class WebViewer:
             e.set_world(**params)
             if reseed:
                 e.reset()
+            self.cfg = e.cfg
             self.mapper = SoundMapper()
             self._push_config()
         elif c == "fork":
@@ -497,6 +503,15 @@ class WebViewer:
             return None
         j["can_fork"] = bool(getattr(rules, "can_fork", False))
         j["gene_docs"] = rules.gene_docs()
+        # Список движков раньше уходил ТОЛЬКО в первом бинарном кадре. На
+        # остановленной симуляции кадров нет вовсе (v0.10.0), и выпадающий
+        # список движков оставался пустым навсегда — выбрать движок было
+        # нечем. Шлём его вместе с конфигом: конфиг приходит и без мира.
+        j["engines"] = list_engines()
+        # предел размера куба у ЭТОГО сервера (--max-n): без него ползунок в
+        # браузере доходил до 256, сервер молча отказывал, и со стороны это
+        # выглядело как «увеличение куба не работает»
+        j["max_n"] = int(self.MAX_N)
         return j
 
     def _push_config(self):
