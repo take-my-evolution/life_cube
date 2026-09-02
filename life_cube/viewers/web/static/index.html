@@ -173,6 +173,8 @@
   <div class="row muted" id="quantHint" style="display:none">Все частоты — гармоники, голоса, гранулы, ноты и полосы вокодера —
     прижимаются к ближайшей ступени выбранного лада. Мир перестаёт звучать «между нот»: что бы ни
     насчитала симуляция, наружу выходит только то, что попадает в тональность.</div>
+  <div class="row"><label class="sp"><input type="checkbox" id="glideOn" checked> Глиссандо</label>
+    <span class="muted">высота едет плавно; без него — прыжком</span></div>
   <div class="row muted" id="quantBox" style="display:none">тоника
     <select id="quantRoot"></select>
     лад <select id="quantScale"></select></div>
@@ -1106,6 +1108,33 @@ const Audio = {
     'хроматика':           [0,1,2,3,4,5,6,7,8,9,10,11],
   },
   quantOn: false, quantRoot: 0, quantScale: 'пентатоника (минор)',
+  // Глиссандо: высота едет к цели экспонентой (setTargetAtTime) или встаёт
+  // прыжком (setValueAtTime). Ручка нужна именно здесь, а не «в каждом
+  // режиме»: плавность — свойство ОДНОГО перехода высоты, и все места, где
+  // частота меняется, ходят через один хелпер.
+  glide: true,
+  /** Назначить частоту с учётом ручки глиссандо. tau — постоянная времени
+   *  плавного переезда; при выключенном глиссандо она игнорируется. */
+  setHz(param, hz, when, tau){
+    if (!(hz > 0) || !isFinite(hz)) return;
+    if (this.glide) param.setTargetAtTime(hz, when, tau);
+    else param.setValueAtTime(hz, when);
+  },
+  setGlide(on){
+    this.glide = !!on;
+    if (!this.ctx || this.glide) return;
+    // выключили посреди переезда — доводим всё до цели немедленно, иначе
+    // голоса застынут там, где их застало переключение
+    const t = this.ctx.currentTime;
+    this.harm.forEach(x=>{ if (x._f) x.o.frequency.setValueAtTime(this.quantHz(x._f), t); });
+    for (const v of this.voices.values()){
+      v.o.frequency.setValueAtTime(this.quantHz(this.baseHz*v.h), t);
+      if (v.o2) v.o2.frequency.setValueAtTime(
+        this.quantHz(this.baseHz*v.h*Math.pow(2, this.speciesDetune(v.sp)/1200)), t);
+    }
+    for (const node of this.vocNodes.values())
+      if (node._f) node.o.frequency.setValueAtTime(this.quantHz(node._f), t);
+  },
   /** Прижать частоту к ладу. Выключенный квантайзер возвращает её как есть —
    *  ни один режим не должен знать, включён он или нет. */
   quantHz(f){
@@ -1130,14 +1159,14 @@ const Audio = {
     if (!this.ctx) return;
     // всё, что уже звучит, переезжает на новую сетку без пересоздания узлов
     const t = this.ctx.currentTime;
-    this.harm.forEach((x,i)=>{ if (x._f) x.o.frequency.setTargetAtTime(this.quantHz(x._f), t, 0.08); });
+    this.harm.forEach((x,i)=>{ if (x._f) this.setHz(x.o.frequency, this.quantHz(x._f), t, 0.08); });
     for (const v of this.voices.values()){
-      v.o.frequency.setTargetAtTime(this.quantHz(this.baseHz*v.h), t, 0.08);
-      if (v.o2) v.o2.frequency.setTargetAtTime(
+      this.setHz(v.o.frequency, this.quantHz(this.baseHz*v.h), t, 0.08);
+      if (v.o2) this.setHz(v.o2.frequency,
         this.quantHz(this.baseHz*v.h*Math.pow(2, this.speciesDetune(v.sp)/1200)), t, 0.08);
     }
     for (const [key, node] of this.vocNodes)
-      if (node._f) node.o.frequency.setTargetAtTime(this.quantHz(node._f), t, 0.08);
+      if (node._f) this.setHz(node.o.frequency, this.quantHz(node._f), t, 0.08);
   },
 
   VOC_LO: 80, VOC_HI: 4000,
@@ -1332,15 +1361,15 @@ const Audio = {
     if (this.sendNo) this.sendNo.gain.setTargetAtTime(on ? 0.35 : 0, t, 0.3);
     if (!on){
       // возвращаем полосы на плоский целочисленный ряд и глушим хоровые голоса
-      this.harm.forEach((x,i)=>{ const f=this.baseHz*(i+1); x.o.frequency.setTargetAtTime(this.quantHz(f),t,0.3); x._f=f; });
+      this.harm.forEach((x,i)=>{ const f=this.baseHz*(i+1); this.setHz(x.o.frequency, this.quantHz(f),t,0.3); x._f=f; });
       for (const v of this.voices.values()) if (v.g2) v.g2.gain.setTargetAtTime(0, t, 0.2);
     }
   },
   setBase(hz){ this.baseHz=hz; if(!this.ctx) return; const t=this.ctx.currentTime;
-    if (!this.colorful){ this.harm.forEach((x,i)=>{ const f=hz*(i+1); x.o.frequency.setTargetAtTime(this.quantHz(f),t,0.05); x._f=f; }); }
+    if (!this.colorful){ this.harm.forEach((x,i)=>{ const f=hz*(i+1); this.setHz(x.o.frequency, this.quantHz(f),t,0.05); x._f=f; }); }
     for (const v of this.voices.values()){
-      v.o.frequency.setTargetAtTime(this.quantHz(hz*v.h), t, 0.05);
-      if (v.o2) v.o2.frequency.setTargetAtTime(this.quantHz(hz*v.h*Math.pow(2, this.speciesDetune(v.sp)/1200)), t, 0.05);
+      this.setHz(v.o.frequency, this.quantHz(hz*v.h), t, 0.05);
+      if (v.o2) this.setHz(v.o2.frequency, this.quantHz(hz*v.h*Math.pow(2, this.speciesDetune(v.sp)/1200)), t, 0.05);
     } },
   apply(sf){
     this.frame = sf;
@@ -1365,7 +1394,7 @@ const Audio = {
     for (let h=0; h<this.nb; h++){
       const f = this.colorful ? this.bandColorFreq(h, bandSp[h]||0) : this.baseHz*(h+1);
       if (Math.abs((this.harm[h]._f ?? f) - f) > 0.01){
-        this.harm[h].o.frequency.setTargetAtTime(this.quantHz(f), t, 0.3); this.harm[h]._f = f;
+        this.setHz(this.harm[h].o.frequency, this.quantHz(f), t, 0.3); this.harm[h]._f = f;
       }
       const a = f<sr2 ? sf.harmonics[h]/Math.sqrt(h+1) : 0;
       this.harm[h].g.gain.setTargetAtTime(a*0.25, t, tau);
@@ -1406,8 +1435,8 @@ const Audio = {
         // щелчком, ровно на интервале пересчёта организмов.
         node.h = v.harmonic;
         const gt = t + this.voiceJitter(v.vid);
-        node.o.frequency.setTargetAtTime(this.quantHz(this.baseHz*v.harmonic), gt, 0.4);
-        node.o2.frequency.setTargetAtTime(this.quantHz(this.baseHz*v.harmonic*Math.pow(2, this.speciesDetune(node.sp)/1200)), gt, 0.4);
+        this.setHz(node.o.frequency, this.quantHz(this.baseHz*v.harmonic), gt, 0.4);
+        this.setHz(node.o2.frequency, this.quantHz(this.baseHz*v.harmonic*Math.pow(2, this.speciesDetune(node.sp)/1200)), gt, 0.4);
       }
       node.g.gain.setTargetAtTime(0.3*v.amp/Math.pow(v.harmonic,0.3), t, 0.15);
       node.g2.gain.setTargetAtTime(this.colorful ? 0.15*v.amp/Math.pow(v.harmonic,0.3) : 0, t, 0.15);
@@ -1923,6 +1952,7 @@ function quantControls(){
       o.value=nm; o.textContent=nm; if(nm===Audio.quantScale) o.selected=true; sc.appendChild(o); });
   }
 }
+$('glideOn').onchange = e=>Audio.setGlide(e.target.checked);
 $('quantOn').onchange = e=>{ Audio.setQuant(e.target.checked); quantControls(); };
 $('quantRoot').onchange = e=>Audio.setQuant(undefined, +e.target.value);
 $('quantScale').onchange = e=>Audio.setQuant(undefined, undefined, e.target.value);

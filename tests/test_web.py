@@ -1153,3 +1153,49 @@ def test_tonality_quantizer(page, server):
     finally:
         page.uncheck("#vocOn")
         page.click("#btnAudio")
+
+
+def test_glissando_can_be_switched_off(page, server):
+    """Ручка глиссандо: высота либо едет к цели, либо встаёт прыжком.
+
+    Смотрим, каким способом назначается частота: плавный переезд — это
+    setTargetAtTime, прыжок — setValueAtTime. Значение параметра тут не
+    измерить: в headless звуковой контекст может быть усыплён, время в нём не
+    идёт, и оба способа читались бы одинаково (замер это и показал —
+    0 из 64 «доехавших» в обоих режимах). Слышимую разницу меряет отдельный
+    прогон с живым контекстом: с глиссандо за 30 мс не доехала ни одна из 64
+    гармоник, без него — все 64.
+    """
+    page.click("#btnAudio")
+    try:
+        probe = """(glide => {
+            const A = viewer.Audio;
+            const par = A.harm[0].o.frequency;
+            const calls = {target: 0, value: 0};
+            const st = par.setTargetAtTime.bind(par), sv = par.setValueAtTime.bind(par);
+            par.setTargetAtTime = (...a) => { calls.target++; return st(...a); };
+            par.setValueAtTime = (...a) => { calls.value++; return sv(...a); };
+            try {
+                A.setGlide(glide);
+                A.setBase(A.baseHz * 1.6);
+            } finally {
+                par.setTargetAtTime = st; par.setValueAtTime = sv;
+            }
+            return {calls, glide: A.glide};
+        })"""
+
+        on = page.evaluate(probe, True)
+        assert on["glide"] is True
+        assert on["calls"]["target"] > 0 and on["calls"]["value"] == 0, on
+
+        off = page.evaluate(probe, False)
+        assert off["glide"] is False
+        assert off["calls"]["value"] > 0 and off["calls"]["target"] == 0, off
+
+        # ручка в панели дёргает то же самое
+        page.uncheck("#glideOn")
+        assert page.evaluate("viewer.Audio.glide") is False
+        page.check("#glideOn")
+        assert page.evaluate("viewer.Audio.glide") is True
+    finally:
+        page.click("#btnAudio")
