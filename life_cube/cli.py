@@ -42,7 +42,8 @@ def build_parser():
 
     s = sub.add_parser("serve", help="веб-просмотр: http://host:port/")
     _common(s)
-    s.add_argument("--engine", default="ecology", help="движок: ecology | lichen")
+    s.add_argument("--engine", default="slope",
+                   help="движок: slope | ecology | lichen | terra")
     s.add_argument("--host", default="0.0.0.0")
     s.add_argument("--port", type=int, default=8765)
     s.add_argument("--rate", type=float, default=0.0,

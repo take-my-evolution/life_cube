@@ -129,7 +129,7 @@ class WebViewer:
     MAX_N = 256          # выше этого куб не даём создать из браузера
 
     def __init__(self, engine: Engine = None, fps=25.0, components_hz=2.0, max_n=256,
-                 rules="ecology", cfg=None, sim_kw=None):
+                 rules="slope", cfg=None, sim_kw=None):
         # Симуляция — управляемый ресурс, а не то, что живёт всегда: пока она
         # остановлена, `self.engine` равен None, мира нет и видеопамять не
         # занята. «Рецепт» мира (движок + Config) живёт ОТДЕЛЬНО от самого
@@ -548,7 +548,7 @@ class WebViewer:
 def serve(cfg=None, use_gpu=False, host="0.0.0.0", port=8765, rate=0.0,
           snapshot_every=0, components=True, autostart=False, fps=25.0,
           components_hz=2.0, yield_ms=0.5, max_n=256, max_cells=400_000,
-          rules="ecology"):
+          rules="slope"):
     """Поднять веб-сервер. Мир по умолчанию НЕ создаётся: сервис поднимается
     мгновенно и не держит видеокарту, пока симуляцию не запустят из браузера
     (`autostart=True` / `--autostart` возвращает старое поведение)."""
