@@ -128,6 +128,12 @@ class Rules:
         ген массы, переопределяют."""
         return [1.0] * int(self.n_species(cfg))
 
+    def species_organisms(self, cfg, state=None):
+        """Сколько ОРГАНИЗМОВ каждого вида. По умолчанию — None: у движка, где
+        клетка и есть организм, отдельная колонка ничего не добавит. Движки, где
+        организм собирается из клеток (дерево — ствол и крона), считают сами."""
+        return None
+
     def to_json(self, cfg, state=None):
         """Описание для панели конструктора: fields/labels/ranges/genomes/world."""
         raise NotImplementedError

@@ -285,6 +285,10 @@ class Engine:
                             for p, m in zip(snap.pops, mass)]
         except Exception:
             snap.biomass = None
+        try:
+            snap.organisms = self.rules.species_organisms(self.cfg, self.state)
+        except Exception:
+            snap.organisms = None
         # график строится по прореженной истории + хвосту: это ~200 точек
         # вместо тысяч, кадр не раздувается
         snap.hist = self.history_series()

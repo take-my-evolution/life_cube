@@ -47,6 +47,7 @@ def encode_snapshot(snap: Snapshot, first=False, sound=None, sent=None) -> bytes
         "m": int(len(snap.soil_coords)) if snap.soil_coords is not None else 0,
         "pops": snap.pops,
         "biomass": getattr(snap, "biomass", None),
+        "organisms": getattr(snap, "organisms", None),
         "rate": getattr(snap, "rate", 0.0),
         "measured_rate": round(getattr(snap, "measured_rate", 0.0), 2),
         "paused": getattr(snap, "paused", False),

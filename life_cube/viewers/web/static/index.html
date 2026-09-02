@@ -216,7 +216,7 @@
   </div>
 
   <h3>Виды <span id="speciesCount" class="muted"></span></h3>
-  <table id="speciesTbl"><thead><tr><th>вид</th><th>клеток</th><th>биомасса</th></tr></thead><tbody></tbody></table>
+  <table id="speciesTbl"><thead><tr><th>вид</th><th>клеток</th><th>организмов</th><th>биомасса</th></tr></thead><tbody></tbody></table>
 
   <h3>Организмы <span id="compCount" class="muted"></span></h3>
   <div class="row"><button id="btnClearSel">снять выделение</button></div>
@@ -268,7 +268,7 @@ const S = {   // состояние вьюера (window.viewer читает/п�
   clipZ: 1e9, slab: 0, speciesMask: new Array(256).fill(1), colorMode: 'species',
   minSize: 1, ghost: true, selected: 0, showStone: true, showSoil: true, showWater: true,
   paused: false, rate: 0, measured: 0, frames: 0, connected: false, autoHz: true,
-  simRunning: false, biomass: null,
+  simRunning: false, biomass: null, organisms: null,
 };
 const $ = id => document.getElementById(id);
 
@@ -517,8 +517,10 @@ function renderSpeciesTable(){ const tb=$('speciesTbl').querySelector('tbody'); 
   $('speciesCount').textContent = `(живых ${rows.length}${S.speciesTotal?', всего было '+S.speciesTotal:''})`;
   for (const [p,s] of rows.slice(0,24)){ const tr=document.createElement('tr'); const c=(COL[s]||[1,1,1]).map(v=>Math.round(v*255));
     const bm = S.biomass ? S.biomass[s-1] : null;
+    const org = S.organisms ? S.organisms[s-1] : null;
+    const num = v => v==null ? '—' : (v>=1000 ? Math.round(v/100)/10+'k' : Math.round(v));
     tr.innerHTML=`<td><span class="sw" style="background:rgb(${c})"></span> ${S.names[s-1]||('вид '+s)}</td>`+
-                 `<td>${p}</td><td>${bm!=null ? (bm>=1000 ? Math.round(bm/100)/10+'k' : Math.round(bm)) : '—'}</td>`;
+                 `<td>${p}</td><td>${num(org)}</td><td>${num(bm)}</td>`;
     tr.onclick=()=>{ const only = S.speciesMask.some((v,i)=>v===0); S.speciesMask = new Array(256).fill(only&&S.speciesMask[s-1]?1:0); S.speciesMask[s-1]=1; buildSpeciesBox(); dirty=true; };
     tb.appendChild(tr); } }
 function drawPops(){ const c=$('pops'); const w=c.width=c.clientWidth*2, h=c.height=140; const g=c.getContext('2d'); g.clearRect(0,0,w,h);
@@ -539,7 +541,7 @@ function applyFrame(buf){
   if (hdr.maps){ const N=hdr.n;
     for (const key of ['stone_h','soil_h','water_h']) if (hdr.maps[key]){
       hdr[key]=new Uint16Array(buf.slice(off, off+N*N*2)); off+=N*N*2; } }
-  S.gen=hdr.gen; S.k=k; S.pops=hdr.pops; S.biomass=hdr.biomass||null; S.comps=hdr.components; S.hist=hdr.hist_tail;
+  S.gen=hdr.gen; S.k=k; S.pops=hdr.pops; S.biomass=hdr.biomass||null; S.organisms=hdr.organisms||null; S.comps=hdr.components; S.hist=hdr.hist_tail;
   S.paused=hdr.paused; S.rate=hdr.rate; S.measured=hdr.measured_rate;
   S.stride=hdr.stride||1; S.componentsOn=hdr.components_on!==false; S.snapshotMs=hdr.snapshot_ms||0;
   if (hdr.relief){ S.relief=hdr.relief; S.stoneH=null; }
