@@ -134,6 +134,11 @@
   <div class="row muted">микс: гармоники <input id="mixH" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.7">
     голоса <input id="mixV" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.6">
     шум <input id="mixN" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.3"></div>
+  <div class="row"><label class="sp"><input type="checkbox" id="waveMode"> Форма волны по видам</label></div>
+  <div class="row muted" id="waveHint" style="display:none">у каждого вида своя волна: синус мягкий, треугольник матовый,
+    пила яркая, квадрат полый. Слышно, кто именно поёт, даже когда все звучат разом.</div>
+  <div id="waveBox" style="display:none"></div>
+
   <div class="row"><label class="sp"><input type="checkbox" id="colorful"> Кристалл (красочный режим)</label></div>
   <div class="row muted" id="colorfulHint">полосы звучат аккордом по видам, голоса — хором, добавлен реверб <input id="mixR" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.3"></div>
   <div class="row"><label class="sp"><input type="checkbox" id="grainOn"> Гранулы (гранулярный синтез)</label></div>
@@ -569,7 +574,10 @@ function applyFrame(buf){
     const key = JSON.stringify([hdr.species_names, hdr.species_colors]);
     if (key !== S.namesKey){ S.namesKey = key; S.names=hdr.species_names; S.nsp=hdr.species_names.length; MAXSP=Math.max(8,S.nsp);
       if (hdr.species_colors){ hdr.species_colors.forEach((hex,i)=>{ if(hex) COL[i+1]=[1,3,5].map(k=>parseInt(hex.slice(k,k+2),16)/255); }); uploadPalette(); }
-      buildSpeciesBox(); }
+      buildSpeciesBox();
+      // список видов приехал (или сменился движок) — пересобираем
+      // выбор формы волны: он подписан именно на виды
+      if (typeof waveControls === 'function') waveControls(); }
   }
   if (hdr.engines) S.engines = hdr.engines;
   if (hdr.config) applyConfig(hdr.config);
@@ -926,6 +934,26 @@ const Audio = {
   ctx: null, on: false, nb: 64, harm: [], noise: null, noiseGain: null, master: null,
   busH: null, busV: null, busN: null, busR: null, reverb: null, sendH: null, sendV: null,
   voices: new Map(), baseHz: 55, frame: null, colorful: false,
+  // Форма волны по видам. Без режима все голоса — треугольники, и на слух
+  // виды различает только высота и расстройка; с ним у каждого своя окраска.
+  waveMode: false, waveBySp: {},
+  WAVES: ['sine','triangle','sawtooth','square'],
+  waveOf(sp){
+    if (!this.waveMode || !sp) return 'triangle';
+    return this.waveBySp[sp] || this.WAVES[(sp-1) % this.WAVES.length];
+  },
+  setWaveMode(on){
+    this.waveMode = !!on;
+    if (!this.ctx) return;
+    // живым голосам форму меняем на месте: пересоздавать их — значит оборвать
+    // огибающие и услышать щелчок на каждом организме
+    for (const node of this.voices.values()) node.o.type = this.waveOf(node.sp);
+  },
+  setSpeciesWave(sp, w){
+    this.waveBySp[sp] = w;
+    if (!this.ctx) return;
+    for (const node of this.voices.values()) if (node.sp === sp) node.o.type = this.waveOf(sp);
+  },
   // гранулы: своя шина, кэш сэмплов по виду и счётчик сыгранных зёрен
   grainOn: false, grainBufs: new Map(), grainsPlayed: 0, busG: null, sendG: null,
   hannCurve: null, _grainTimer: null, _grainNext: 0, GRAIN_REF_HZ: 110,
@@ -1077,7 +1105,7 @@ const Audio = {
     for (const v of sf.voices){
       seen.add(v.vid); let node = this.voices.get(v.vid);
       if (!node){
-        const o=this.ctx.createOscillator(); o.type='triangle'; o.frequency.value=this.baseHz*v.harmonic;
+        const o=this.ctx.createOscillator(); o.type=this.waveOf(v.species); o.frequency.value=this.baseHz*v.harmonic;
         const lfo=this.ctx.createOscillator(); lfo.frequency.value=5; const lg=this.ctx.createGain(); lg.gain.value=0;
         lfo.connect(lg); lg.connect(o.frequency); lfo.start();
         const g=this.ctx.createGain(); g.gain.value=0; const p=this.ctx.createStereoPanner(); p.pan.value=v.pan;
@@ -1507,10 +1535,15 @@ const Audio = {
     const deg=this.PENTA[(sp-1) % this.PENTA.length];
     const oct=Math.round(this.meanHeight(sp)*2)-1;
     const f=this.baseHz*Math.pow(2, 1 + oct + deg/12 + this.speciesDetune(sp)/1200);
-    const o=ctx.createOscillator(); o.setPeriodicWave(rec.wave); o.frequency.value=f;
+    const o=ctx.createOscillator();
+    // в режиме «форма волны по видам» нота берёт волну вида, иначе — сэмпл,
+    // собранный из генома (см. noteWave)
+    if (this.waveMode) o.type=this.waveOf(sp); else o.setPeriodicWave(rec.wave);
+    o.frequency.value=f;
     // второй осциллятор, расстроенный по негармоничности — от него биения и
     // «металл» у видов с высоким inh; у тональных видов расстройка около нуля
-    const o2=ctx.createOscillator(); o2.setPeriodicWave(rec.wave);
+    const o2=ctx.createOscillator();
+    if (this.waveMode) o2.type=this.waveOf(sp); else o2.setPeriodicWave(rec.wave);
     o2.frequency.value=f; o2.detune.value=T.inh*2600;
     const g=ctx.createGain(), g2=ctx.createGain();
     g.gain.value=0; g2.gain.value=0.35;
@@ -1580,6 +1613,29 @@ $('mixN').oninput = e=>{ if(Audio.busN) Audio.busN.gain.value=+e.target.value; }
 $('mixR').oninput = e=>{ if(Audio.busR) Audio.busR.gain.value=+e.target.value; };
 $('mixG').oninput = e=>{ if(Audio.busG) Audio.busG.gain.value=+e.target.value; };
 $('colorful').onchange = e=>Audio.setColorful(e.target.checked);
+const WAVE_RU = {sine:'синус', triangle:'треугольник', sawtooth:'пила', square:'квадрат'};
+function waveControls(){
+  const box=$('waveBox'), on=$('waveMode').checked;
+  box.style.display = on ? '' : 'none';
+  $('waveHint').style.display = on ? '' : 'none';
+  if (!on) { box.innerHTML=''; return; }
+  box.innerHTML='';
+  const names=S.names||[];
+  for (let sp=1; sp<=Math.max(names.length, S.nsp||0); sp++){
+    const row=document.createElement('div'); row.className='row muted';
+    const c=(COL[sp]||[1,1,1]).map(v=>Math.round(v*255));
+    row.innerHTML=`<span class="sw" style="background:rgb(${c})"></span> ${names[sp-1]||('вид '+sp)} `;
+    const sel=document.createElement('select');
+    for (const w of Audio.WAVES){
+      const op=document.createElement('option'); op.value=w; op.textContent=WAVE_RU[w]||w;
+      if (Audio.waveOf(sp)===w) op.selected=true;
+      sel.appendChild(op);
+    }
+    sel.onchange=()=>Audio.setSpeciesWave(sp, sel.value);
+    row.appendChild(sel); box.appendChild(row);
+  }
+}
+$('waveMode').onchange = e=>{ Audio.setWaveMode(e.target.checked); waveControls(); };
 $('grainOn').onchange = e=>{ Audio.init(); Audio.setGrain(e.target.checked); };
 $('grainRate').oninput = e=>{ $('grainRateLbl').textContent = e.target.value; };
 $('grainMs').oninput = e=>{ $('grainMsLbl').textContent = e.target.value; };

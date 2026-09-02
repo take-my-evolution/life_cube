@@ -899,3 +899,62 @@ def test_euclidean_rhythm_tracks_species_share(page, server):
         assert sum(hits["pat"][:5]) < 4, hits["pat"]
     finally:
         page.click("#btnAudio")
+
+
+def test_species_waveform_mode(page, server):
+    """Режим «форма волны по видам»: чекбокс раздаёт каждому виду свою волну.
+
+    Без режима все голоса — треугольники, и виды на слух различает только
+    высота с расстройкой. С режимом у каждого своя окраска, и выбор можно
+    поменять вручную по каждому виду.
+    """
+    page.click("#btnAudio")
+    try:
+        page.wait_for_timeout(400)
+        assert page.evaluate("viewer.Audio.voices.size") > 0, "голосов нет — проверять нечего"
+        plain = page.evaluate("[...viewer.Audio.voices.values()].map(v => v.o.type)")
+        assert set(plain) == {"triangle"}, plain
+        assert page.evaluate("document.getElementById('waveBox').style.display") == "none"
+
+        page.check("#waveMode")
+        page.wait_for_timeout(300)
+        typed = page.evaluate(
+            "[...viewer.Audio.voices.values()].map(v => [v.sp, v.o.type])")
+        by_sp = {sp: t for sp, t in typed}
+        assert len(set(by_sp.values())) > 1, f"все виды получили одну волну: {by_sp}"
+        for sp, t in by_sp.items():
+            assert t == page.evaluate(f"viewer.Audio.waveOf({sp})")
+            assert t in page.evaluate("viewer.Audio.WAVES")
+        # у одного вида — одна волна на все его голоса
+        for sp, t in typed:
+            assert by_sp[sp] == t
+
+        # панель выбора появилась и знает виды
+        box = page.evaluate("""(() => {
+            const rows = [...document.querySelectorAll('#waveBox .row')];
+            return {shown: document.getElementById('waveBox').style.display !== 'none',
+                    rows: rows.length,
+                    values: rows.map(r => r.querySelector('select').value)};
+        })()""")
+        assert box["shown"] and box["rows"] >= 1
+        assert all(v in page.evaluate("viewer.Audio.WAVES") for v in box["values"])
+
+        # ручная смена волны вида доходит до ЖИВЫХ голосов, не пересоздавая их
+        sp = int(typed[0][0])
+        ids_before = page.evaluate("[...viewer.Audio.voices.keys()]")
+        page.evaluate(f"viewer.Audio.setSpeciesWave({sp}, 'square')")
+        page.wait_for_timeout(200)
+        now = page.evaluate(
+            f"[...viewer.Audio.voices.values()].filter(v => v.sp === {sp}).map(v => v.o.type)")
+        assert now and set(now) == {"square"}, now
+        assert page.evaluate("[...viewer.Audio.voices.keys()]") == ids_before, \
+            "голоса пересоздались — на слух это щелчок на каждом организме"
+
+        # выключаем — возвращается общий треугольник, снова без пересоздания
+        page.uncheck("#waveMode")
+        page.wait_for_timeout(200)
+        back = page.evaluate("[...viewer.Audio.voices.values()].map(v => v.o.type)")
+        assert set(back) == {"triangle"}, back
+        assert page.evaluate("document.getElementById('waveBox').style.display") == "none"
+    finally:
+        page.click("#btnAudio")
