@@ -261,6 +261,15 @@ class Engine:
             snap.soil_coords = None
             self.relief = snap.stone_h
         snap.relief = self.relief
+        # биомасса: клетка мха и клетка дерева — разные вещи, поэтому кроме
+        # числа клеток считаем и массу. species_mass() у движка без гена массы
+        # вернёт единицы, и биомасса совпадёт с населением
+        try:
+            mass = self.rules.species_mass(self.cfg)
+            snap.biomass = [round(float(p) * float(m), 1)
+                            for p, m in zip(snap.pops, mass)]
+        except Exception:
+            snap.biomass = None
         # график строится по прореженной истории + хвосту: это ~200 точек
         # вместо тысяч, кадр не раздувается
         snap.hist = self.history_series()

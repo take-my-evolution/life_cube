@@ -30,10 +30,13 @@ class Component:
 class Snapshot:
     gen: int
     n: int
-    pops: list                      # население по видам
+    pops: list                      # население по видам (клеток)
     coords: np.ndarray              # (k, 3) uint16 — живые клетки
     species: np.ndarray             # (k,) uint8
     labels: np.ndarray              # (k,) uint32 — устойчивый id организма
+    # биомасса по видам = клетки × масса клетки. Клетка мха и клетка дерева
+    # весят по-разному, поэтому «сколько живого в мире» — это не число клеток
+    biomass: list = None
     components: list = field(default_factory=list)   # [Component]
     soil_coords: np.ndarray = None  # (m, 3) uint16 — растворённый камень (разреженно)
     # для движков, где подложка — карты высот: рельеф передаётся ими, а не

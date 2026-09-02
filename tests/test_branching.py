@@ -83,7 +83,10 @@ def test_branches_prefer_light_and_shade_below():
 
 
 def test_default_world_grows_trees_and_keeps_others():
-    cfg = Config(n=32, gens=40, seed_density=0.02, animal_share=0.0)
+    # 250 поколений, а не 40: с появлением экономики роста (v0.11) дерево —
+    # самый медленный вид, удваивается почти за сотню поколений, и за 40 оно
+    # физически не успевает отрастить ни одной ветки
+    cfg = Config(n=32, gens=250, seed_density=0.02, animal_share=0.0)
     from life_cube import run
     res = run(cfg, verbose=False)
     pops = res["hist"][-1]

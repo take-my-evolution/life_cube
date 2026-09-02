@@ -196,12 +196,12 @@ def test_constructor_panel_edits_genomes(page, server):
     """Лаборатория генома приходит с конфигом и правит геномы на сервере."""
     page.evaluate("viewer.labOpen(true)")
     cfg = page.evaluate("viewer.CFG.data")
-    assert cfg and len(cfg["fields"]) == 14 and len(cfg["genomes"]) == len(cfg["names"])
+    assert cfg and len(cfg["fields"]) == 15 and len(cfg["genomes"]) == len(cfg["names"])
     assert "травоядное" in cfg["names"] and "хищник" in cfg["names"]
     # карточка на каждый ген: значок, ползунок, число и описание
-    assert page.locator("#genes .gcard").count() == 14
-    assert page.locator("#genes input[type=range]").count() == 14
-    assert page.locator("#genes .gcard svg.icon").count() == 14
+    assert page.locator("#genes .gcard").count() == 15
+    assert page.locator("#genes input[type=range]").count() == 15
+    assert page.locator("#genes .gcard svg.icon").count() == 15
     assert page.locator("#speciesPick .sprow").count() == len(cfg["names"])
     # правим ген через API панели и применяем
     gi = cfg["fields"].index("metabolism")

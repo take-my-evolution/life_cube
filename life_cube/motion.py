@@ -76,10 +76,20 @@ def animals_step(state, cfg, xp, correlate, rng):
     solid = alive | stone
     trophic = xp.zeros(species.shape, dtype=xp.int32)
     armor = xp.zeros(species.shape, dtype=xp.float32)
+    # Пищевая ценность клетки — её МАССА (плотность ткани), а не запас
+    # энергии. Раньше едок получал `energy` жертвы, а туда клалась константа
+    # plant_energy: клетка мха кормила ровно так же, как клетка дерева.
+    # Теперь клетка дерева (масса 4.0) сытнее клетки мха (0.3) больше чем на
+    # порядок — и это же число задаёт вклад вида в биомассу мира.
+    i_mass = IDX.get("mass")
+    food = xp.zeros(species.shape, dtype=xp.float32)
     for s in range(1, cfg.n_species + 1):
         m = species == s
-        trophic = xp.where(m, int(G[s - 1][i_tro]), trophic)
-        armor = xp.where(m, float(G[s - 1][i_arm]), armor)
+        g = G[s - 1]
+        trophic = xp.where(m, int(g[i_tro]), trophic)
+        armor = xp.where(m, float(g[i_arm]), armor)
+        mv = float(g[i_mass]) if (i_mass is not None and i_mass < len(g)) else 0.0
+        food = xp.where(m, mv if mv > 0 else float(cfg.plant_energy), food)
 
     # --- 1. охота: кто кого съел --------------------------------------------
     killed = xp.zeros(species.shape, dtype=bool)
@@ -105,8 +115,8 @@ def animals_step(state, cfg, xp, correlate, rng):
         p_kill = 1.0 - (1.0 - single) ** xp.minimum(pred_around, 6.0)
         newly = prey & (pred_around > 0) & (rng.random(species.shape) < p_kill)
         killed = killed | newly
-        # энергия жертвы делится между прижавшимися хищниками
-        share = xp.where(newly, energy / xp.maximum(pred_around, 1.0), 0.0)
+        # плоть жертвы делится между прижавшимися хищниками
+        share = xp.where(newly, food / xp.maximum(pred_around, 1.0), 0.0)
         got = xp.zeros(species.shape, dtype=xp.float32)
         for d in DIRS:
             got += shift(share, tuple(-k for k in d), xp)

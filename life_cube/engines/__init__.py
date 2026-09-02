@@ -121,6 +121,12 @@ class Rules:
     def species_colors(self, cfg):
         raise NotImplementedError
 
+    def species_mass(self, cfg):
+        """Масса ОДНОЙ клетки каждого вида — для расчёта биомассы.
+        По умолчанию все клетки одинаковы (единица); движки, у которых есть
+        ген массы, переопределяют."""
+        return [1.0] * int(self.n_species(cfg))
+
     def to_json(self, cfg, state=None):
         """Описание для панели конструктора: fields/labels/ranges/genomes/world."""
         raise NotImplementedError
