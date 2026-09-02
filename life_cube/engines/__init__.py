@@ -17,6 +17,7 @@ ENGINES = {
     "ecology": "life_cube.engines.ecology",
     "lichen": "life_cube.engines.lichen",
     "terra": "life_cube.engines.terra",
+    "slope": "life_cube.engines.slope",
 }
 
 _cache = {}
