@@ -157,3 +157,31 @@ def test_reseed_returns_a_single_extinct_species():
     e.maybe_reseed(pops)
     back = int((np.asarray(e.state["species"]) == PRED).sum())
     assert back > 0, "хищник не вернулся"
+
+
+def test_predator_eats_adjacent_prey():
+    """Охота ищет добычу по заранее посчитанной карте столбцов, а не сканом
+    столбца на каждое направление каждого зверя (это стоило 90 % шага). Карта
+    обязана видеть ту же добычу, что видел скан."""
+    R = get_rules("slope")
+    cfg = R.make_config(n=16, seed_world=1, seed_animals=0.0, seed_tree=0.0,
+                        seed_density=0.0)
+    xp, corr, _ = get_backend(False)
+    st, _ = R.init_state(cfg, xp)
+    sp = np.asarray(st["species"]).copy()
+    en = np.asarray(st["energy"]).copy()
+    surf = np.asarray(st["stone_h"]) + np.asarray(st["soil_h"])
+    sp[:] = 0
+    x, y = 8, 8
+    z, zp = int(surf[x, y]), int(surf[x + 1, y])
+    sp[x, y, z] = PRED                     # хищник и травоядное бок о бок
+    en[x, y, z] = 5.0
+    sp[x + 1, y, zp] = HERB
+    en[x + 1, y, zp] = 5.0
+    st["species"], st["energy"] = xp.asarray(sp), xp.asarray(en)
+    for g in range(1, 60):
+        R.step(st, cfg, xp, corr, g)
+        if not (np.asarray(st["species"]) == HERB).any():
+            break
+    else:
+        raise AssertionError("хищник за 60 поколений не съел соседа")

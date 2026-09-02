@@ -596,6 +596,12 @@ class SlopeRules(Rules):
                 attract = gaussian_filter(prey2d, sigma=max(sense / 2.0, 0.5), mode="constant")
             else:
                 attract = prey2d
+            # Где в столбце лежит ближайшая добыча. Раньше это искали заново
+            # (np.isin по всему столбцу) на каждое из пяти направлений каждого
+            # зверя: 8800 вызовов isin за шаг и 90 % времени всего движка.
+            # Одна карта на вид — и поиск становится чтением двух чисел.
+            prey_mask = np.isin(sp, prey_sp) if prey_sp else np.zeros(sp.shape, bool)
+            prey_z = np.where(prey_mask.any(axis=2), prey_mask.argmax(axis=2), -1)
             rng_cpu = np.random.default_rng((cfg.seed_mut ^ (s * 7919)) + int(state["gen"]))
             for (x, y, z) in here:
                 if sp[x, y, z] != s:
@@ -629,16 +635,23 @@ class SlopeRules(Rules):
                         nx, ny = x + dx, y + dy
                         if not (0 <= nx < n and 0 <= ny < n):
                             continue
-                        col = sp[nx, ny]
-                        hits = np.argwhere(np.isin(col, prey_sp)).ravel()
-                        if not len(hits):
+                        pz = int(prey_z[nx, ny])
+                        if pz < 0:
                             continue
-                        pz = int(hits[0])
-                        armor = float(G[col[pz] - 1][IDX["armor"]])
+                        victim = int(sp[nx, ny, pz])
+                        if victim == 0:            # карта отстала: добычу уже съели
+                            prey_mask[nx, ny, pz] = False
+                            col = prey_mask[nx, ny]
+                            prey_z[nx, ny] = col.argmax() if col.any() else -1
+                            continue
+                        armor = float(G[victim - 1][IDX["armor"]])
                         if rng_cpu.random() > hunt * (1 - armor):
                             continue
-                        en[x, y, z] += cfg.eat_efficiency * float(G[col[pz] - 1][IDX["mass"]])
+                        en[x, y, z] += cfg.eat_efficiency * float(G[victim - 1][IDX["mass"]])
                         sp[nx, ny, pz], en[nx, ny, pz], ag[nx, ny, pz] = 0, 0.0, 0
+                        prey_mask[nx, ny, pz] = False
+                        col = prey_mask[nx, ny]
+                        prey_z[nx, ny] = col.argmax() if col.any() else -1
                         break
                 # обмен, смерть, деление
                 en[x, y, z] -= float(g[IDX["metabolism"]])
