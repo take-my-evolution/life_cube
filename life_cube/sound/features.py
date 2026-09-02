@@ -15,6 +15,8 @@
 
 from dataclasses import dataclass, field, asdict
 
+import math
+
 import numpy as np
 
 from ..snapshot import Snapshot
@@ -46,6 +48,10 @@ class SoundFrame:
     # клиентом для режима "Кристалл": каждая полоса красится по своему виду
     # вместо плоского целочисленного обертона.
     band_species: list = field(default_factory=list)
+    # границы шкалы основного тона: ползунок в панели берёт их отсюда, а не
+    # держит зашитыми 20..220
+    base_min: float = 36.0
+    base_max: float = 220.0
 
     def to_dict(self):
         d = asdict(self)
@@ -64,7 +70,8 @@ class SoundMapper:
     PENTA = (0, 3, 5, 7, 10, 12, 15, 17, 19, 22)
 
     def __init__(self, n_bands=64, max_voices=12, min_voice_size=8,
-                 amp_ref=None, base_min=36.0):
+                 amp_ref=None, base_min=36.0, base_max=220.0, pop_ref=None,
+                 glide=0.15):
         self.n_bands = n_bands
         self.max_voices = max_voices
         self.min_voice_size = min_voice_size
@@ -74,6 +81,11 @@ class SoundMapper:
         self._prev_cells = None
         self._peak = 1.0
         self.base_min = float(base_min)
+        self.base_max = float(max(base_max, base_min * 1.05))
+        # опорное население: None — считать по самому миру (см. base_from_world)
+        self.pop_ref = float(pop_ref) if pop_ref else None
+        self.glide = float(min(max(glide, 0.01), 1.0))
+        self._pop_log = None
         self._base_hz = float(base_min) * 1.5
         self._dominant = None
 
@@ -184,18 +196,41 @@ class SoundMapper:
         return out, births, deaths
 
     def base_from_world(self, snap: Snapshot):
-        """Основной тон вычисляется из населения: тональность задаёт
-        доминирующий вид, октаву — насколько густо заселён мир."""
+        """Основной тон из населения: ступень задаёт доминирующий вид, высоту —
+        насколько густо заселён мир СЕЙЧАС по сравнению с собой обычным.
+
+        Раньше октава была ступенчатой (три корзины: <2000, <40000, дальше), и
+        всё отображение имело от силы полтора десятка возможных значений: тон
+        подползал к одному из них и замирал там навсегда, хотя население
+        продолжало колебаться в разы. Со стороны это и есть «тон застыл» — он
+        застывал не по ошибке, а потому что цель не двигалась.
+
+        Опора считается по САМОМУ МИРУ — медленное среднее его населения.
+        Иначе шкалу приходится подбирать под размер куба: на 128³ тон всегда
+        упирался бы в потолок, а на 32³ лежал на полу.
+        """
         pops = list(snap.pops)
         total = sum(pops)
         if total <= 0:
             return self._base_hz
         dom = int(np.argmax(pops))
         degree = self.PENTA[dom % len(self.PENTA)]
-        octave = 0 if total < 2000 else (1 if total < 40000 else 2)
-        target = self.base_min * (2.0 ** octave) * (2.0 ** (degree / 12.0))
+
+        lg = math.log2(max(total, 1.0))
+        if self.pop_ref:
+            ref = math.log2(self.pop_ref)
+        else:
+            self._pop_log = (lg if self._pop_log is None
+                             else self._pop_log + 0.002 * (lg - self._pop_log))
+            ref = self._pop_log
+        octaves = math.log2(self.base_max / self.base_min)
+        head = max(octaves - 1.0, 0.25)          # октава оставлена ступеням лада
+        # разброс населения втрое туда и обратно разворачивается во всю шкалу
+        span = min(max((lg - ref) / 3.0 + 0.5, 0.0), 1.0) * head
+        target = self.base_min * (2.0 ** span) * (2.0 ** (degree / 12.0))
+        target = min(max(target, self.base_min), self.base_max)
         # плавный переход: скачок тона резал бы слух
-        self._base_hz += 0.15 * (target - self._base_hz)
+        self._base_hz += self.glide * (target - self._base_hz)
         self._dominant = dom + 1
         return self._base_hz
 
@@ -207,4 +242,5 @@ class SoundMapper:
             vs, births, deaths = self.species_voices(snap)
         return SoundFrame(gen=snap.gen, harmonics=amp, noise=noise, voices=vs,
                           births=births, deaths=deaths, activity=self.activity(snap),
-                          base_hz=self.base_from_world(snap), band_species=band_species)
+                          base_hz=self.base_from_world(snap), band_species=band_species,
+                          base_min=self.base_min, base_max=self.base_max)
