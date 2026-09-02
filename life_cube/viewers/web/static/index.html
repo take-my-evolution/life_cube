@@ -127,6 +127,10 @@
   <div class="row"><label class="sp"><input type="checkbox" id="autoHz" checked> тон из населения</label>
     <span class="muted" id="hzLbl">55 Гц</span></div>
   <input id="baseHz" type="range" min="20" max="220" step="1" value="55">
+  <div class="row muted">шкала тона: от <input id="hzMin" type="number" min="1" max="3999" step="1" value="36" style="width:64px">
+    до <input id="hzMax" type="number" min="2" max="4000" step="1" value="220" style="width:64px"> Гц</div>
+  <div class="row muted">Тон из населения ведёт ступень доминирующего вида, а высоту — насколько мир
+    гуще обычного ДЛЯ СЕБЯ: опора считается по самому миру, поэтому шкала не зависит от размера куба.</div>
   <div class="row muted">микс: гармоники <input id="mixH" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.7">
     голоса <input id="mixV" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.6">
     шум <input id="mixN" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.3"></div>
@@ -1046,6 +1050,11 @@ const Audio = {
     this.trackPops();
     if (!this.ctx || !this.on || !sf) return;
     // основной тон приходит из мира (его считает SoundMapper по населению)
+    if (sf.base_min && sf.base_max && +$('hzMin').value !== sf.base_min){
+      // шкалу задаёт сервер: ползунок и поля подстраиваются под неё
+      $('hzMin').value = Math.round(sf.base_min); $('hzMax').value = Math.round(sf.base_max);
+      $('baseHz').min = Math.round(sf.base_min); $('baseHz').max = Math.round(sf.base_max);
+    }
     if (S.autoHz && sf.base_hz && Math.abs(sf.base_hz - this.baseHz) > 0.05){
       this.setBase(sf.base_hz); $('hzLbl').textContent = sf.base_hz.toFixed(1)+' Гц';
       $('baseHz').value = Math.round(sf.base_hz);
@@ -1556,6 +1565,14 @@ const Audio = {
 $('btnAudio').onclick = ()=>Audio.toggle();
 $('vol').oninput = e=>{ $('volLbl').textContent=e.target.value; if(Audio.master) Audio.master.gain.setTargetAtTime(+e.target.value, Audio.ctx.currentTime, 0.05); };
 $('baseHz').oninput = e=>{ S.autoHz=false; $('autoHz').checked=false; $('hzLbl').textContent=e.target.value+' Гц'; Audio.setBase(+e.target.value); };
+function sendHzScale(){
+  const lo=+$('hzMin').value, hi=+$('hzMax').value;
+  if (!(lo>=1 && hi>lo && hi<=4000)) { $('status').textContent='шкала тона: нужно 1 ≤ мин < макс ≤ 4000 Гц'; return; }
+  $('baseHz').min=lo; $('baseHz').max=hi;               // ползунок живёт в той же шкале
+  send({cmd:'sound', value:{base_min:lo, base_max:hi}});
+}
+$('hzMin').onchange = sendHzScale;
+$('hzMax').onchange = sendHzScale;
 $('autoHz').onchange = e=>{ S.autoHz = e.target.checked; };
 $('mixH').oninput = e=>{ if(Audio.busH) Audio.busH.gain.value=+e.target.value; };
 $('mixV').oninput = e=>{ if(Audio.busV) Audio.busV.gain.value=+e.target.value; };

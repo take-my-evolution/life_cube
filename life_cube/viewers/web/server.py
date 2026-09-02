@@ -150,6 +150,7 @@ class WebViewer:
         self.clients = set()
         self.latest = None
         self._new = asyncio.Event()
+        self.sound_kw = {}          # настройки шкалы тона, переживают пересоздание
         self.mapper = SoundMapper()
         self.latest_sound = None
         self._sent = {}            # что клиентам уже отправлено (рельеф, имена)
@@ -181,7 +182,7 @@ class WebViewer:
             eng = Engine(self.cfg, rules=self.rules_name, **self._sim_kw)
             eng.on_snapshot(self._on_snapshot)
             self.engine = eng
-            self.mapper = SoundMapper()
+            self.mapper = SoundMapper(**self.sound_kw)
             self._sent = {}
             th = threading.Thread(target=eng.run, daemon=True, name="life-cube-sim")
             self._sim_thread = th
@@ -417,17 +418,39 @@ class WebViewer:
         elif c == "snapshot":
             e.publish(force=True)
         elif c == "reset_sound":
-            self.mapper = SoundMapper()
+            self.mapper = SoundMapper(**self.sound_kw)
+        elif c == "sound":
+            # шкала основного тона: границы и плавность. Мир не трогаем — это
+            # настройка слушателя, а не мира
+            v = dict(cmd.get("value") or {})
+            kw = {}
+            lo = float(v.get("base_min", self.mapper.base_min))
+            hi = float(v.get("base_max", self.mapper.base_max))
+            if not (1.0 <= lo < hi <= 4000.0):
+                raise ValueError("шкала тона: нужно 1 ≤ мин < макс ≤ 4000 Гц")
+            kw["base_min"], kw["base_max"] = lo, hi
+            if "glide" in v:
+                kw["glide"] = float(v["glide"])
+            if v.get("pop_ref"):
+                kw["pop_ref"] = float(v["pop_ref"])
+            self.sound_kw = kw
+            keep = self.mapper
+            self.mapper = SoundMapper(**kw)
+            # тон не сбрасываем в ноль: слушатель крутит границы на ходу
+            self.mapper._base_hz = min(max(keep._base_hz, lo), hi)
+            self.mapper._pop_log = keep._pop_log
+            return {"sound": {"base_min": lo, "base_max": hi,
+                              "glide": self.mapper.glide}}
         elif c == "genomes":
             e.set_genomes(cmd["value"], ids=cmd.get("ids"))
             self._push_config()
         elif c == "randomize":
             e.randomize(seed=cmd.get("seed"))
-            self.mapper = SoundMapper()
+            self.mapper = SoundMapper(**self.sound_kw)
             self._push_config()
         elif c == "restart":
             e.reset()
-            self.mapper = SoundMapper()
+            self.mapper = SoundMapper(**self.sound_kw)
             self._push_config()
         elif c == "engine":
             name = str(cmd.get("value"))
@@ -441,7 +464,7 @@ class WebViewer:
             # self.cfg оставался прежним — Запустить после Остановить собрал
             # бы мир по устаревшему движку и размеру
             self.rules_name, self.cfg = e.rules.name, e.cfg
-            self.mapper = SoundMapper()
+            self.mapper = SoundMapper(**self.sound_kw)
             self._push_config()
         elif c == "world":
             params = dict(cmd.get("value") or {})
@@ -456,7 +479,7 @@ class WebViewer:
             if reseed:
                 e.reset()
             self.cfg = e.cfg
-            self.mapper = SoundMapper()
+            self.mapper = SoundMapper(**self.sound_kw)
             self._push_config()
         elif c == "fork":
             # ответвить новый вид от живущего, не трогая родителя
@@ -481,7 +504,7 @@ class WebViewer:
             e.set_world(**params)
             if bool(cmd.get("restart", False)):
                 e.reset()
-                self.mapper = SoundMapper()
+                self.mapper = SoundMapper(**self.sound_kw)
             self._push_config()
         elif c == "config":
             self._push_config()
