@@ -1087,3 +1087,69 @@ def test_vocoder_top_view(page, server):
         assert loud == 0, f"после выключения звучат {loud} полос"
     finally:
         page.click("#btnAudio")
+
+def test_tonality_quantizer(page, server):
+    """Квантайзер: ВСЕ частоты прижимаются к ступеням выбранного лада.
+
+    Проверяем именно «везде»: гармоники, голоса организмов и полосы вокодера
+    считаются в разных местах и по разным формулам, и смысл ручки в том, что
+    ни одна из них не может выйти за лад.
+    """
+    page.click("#btnAudio")
+    try:
+        page.check("#vocOn")
+        page.wait_for_timeout(400)
+
+        audit = """(root => {
+            const A = viewer.Audio, sc = A.QUANT_SCALES[A.quantScale];
+            const all = [];
+            A.harm.forEach(x => all.push(['гармоника', x.o.frequency.value]));
+            for (const v of A.voices.values()){
+                all.push(['голос', v.o.frequency.value]);
+                if (v.o2) all.push(['голос2', v.o2.frequency.value]);
+            }
+            for (const n of A.vocNodes.values()) all.push(['вокодер', n.o.frequency.value]);
+            const bad = all.filter(([k, f]) => {
+                if (!(f > 0)) return false;
+                const midi = 69 + 12*Math.log2(f/440);
+                if (Math.abs(midi - Math.round(midi)) > 0.02) return true;
+                const pc = (((Math.round(midi) - root) % 12) + 12) % 12;
+                return sc.indexOf(pc) < 0;
+            });
+            const kinds = {};
+            for (const [k] of all) kinds[k] = (kinds[k]||0) + 1;
+            return {total: all.length, kinds, bad: bad.length,
+                    sample: bad.slice(0,4).map(([k,f]) => k + ' ' + Math.round(f*10)/10)};
+        })"""
+
+        # без квантайзера частоты лежат где угодно
+        loose = page.evaluate(audit, 0)
+        assert loose["total"] > 60, loose
+        assert loose["bad"] > 0, "без квантайзера все частоты и так в ладу — проверять нечего"
+
+        page.check("#quantOn")
+        page.wait_for_timeout(1200)          # ползут плавно, даём доехать
+        tight = page.evaluate(audit, 0)
+        assert tight["total"] > 60, tight
+        assert tight["bad"] == 0, f"вне лада: {tight['bad']} из {tight['total']} — {tight['sample']}"
+        # и это правда РАЗНЫЕ места, а не одни гармоники
+        assert len(tight["kinds"]) >= 3, tight["kinds"]
+
+        # смена тоники и лада на ходу: узлы переезжают, а не пересоздаются
+        ids = page.evaluate("[...viewer.Audio.vocNodes.keys()]")
+        page.select_option("#quantScale", "мажор")
+        page.select_option("#quantRoot", "7")
+        page.wait_for_timeout(1200)
+        moved = page.evaluate(audit, 7)
+        assert moved["bad"] == 0, f"после смены лада вне него: {moved['sample']}"
+        assert page.evaluate("viewer.Audio.quantScale") == "мажор"
+        assert page.evaluate("[...viewer.Audio.vocNodes.keys()]") == ids
+
+        # выключение возвращает исходные частоты
+        page.uncheck("#quantOn")
+        page.wait_for_timeout(1200)
+        back = page.evaluate(audit, 7)
+        assert back["bad"] > 0, "после выключения частоты остались в ладу"
+    finally:
+        page.uncheck("#vocOn")
+        page.click("#btnAudio")

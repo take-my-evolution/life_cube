@@ -168,6 +168,14 @@
   <div class="row muted">полос <b id="vocBandsLbl">24</b>
     <input id="vocBands" type="range" style="width:70px" min="8" max="96" step="8" value="24"></div>
   <div class="row muted">микс вокодера <input id="mixVo" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.7"></div>
+
+  <div class="row"><label class="sp"><input type="checkbox" id="quantOn"> Квантайзер тональности</label></div>
+  <div class="row muted" id="quantHint" style="display:none">Все частоты — гармоники, голоса, гранулы, ноты и полосы вокодера —
+    прижимаются к ближайшей ступени выбранного лада. Мир перестаёт звучать «между нот»: что бы ни
+    насчитала симуляция, наружу выходит только то, что попадает в тональность.</div>
+  <div class="row muted" id="quantBox" style="display:none">тоника
+    <select id="quantRoot"></select>
+    лад <select id="quantScale"></select></div>
   <canvas id="waterfall" title="спектр-водопад: 64 полосы куба снизу вверх, время слева направо"></canvas>
 
   <h3>Геном</h3>
@@ -1033,7 +1041,7 @@ const Audio = {
     for (const b of [this.busH,this.busV,this.busN]) b.connect(this.master);
     // гармоники
     for (let h=1; h<=this.nb; h++){
-      const o = ctx.createOscillator(); o.type='sine'; o.frequency.value = this.baseHz*h;
+      const o = ctx.createOscillator(); o.type='sine'; o.frequency.value = this.quantHz(this.baseHz*h);
       const g = ctx.createGain(); g.gain.value = 0; o.connect(g); g.connect(this.busH); o.start();
       this.harm.push({o,g,_f:this.baseHz*h});
     }
@@ -1080,6 +1088,58 @@ const Audio = {
   },
 
   // --- вокодер «вид сверху» ------------------------------------------------
+  // --- квантайзер тональности ----------------------------------------------
+  // Общий фильтр высоты: ЛЮБАЯ частота, прежде чем уйти в осциллятор,
+  // прижимается к ближайшей ступени выбранного лада. Точка одна, поэтому
+  // режимы (гармоники, голоса, гранулы, ноты, вокодер) не расходятся во
+  // мнениях о том, что сейчас за тональность.
+  QUANT_NOTES: ['до','до#','ре','ре#','ми','фа','фа#','соль','соль#','ля','ля#','си'],
+  QUANT_SCALES: {
+    'пентатоника (минор)': [0,3,5,7,10],
+    'пентатоника (мажор)': [0,2,4,7,9],
+    'мажор':               [0,2,4,5,7,9,11],
+    'минор':               [0,2,3,5,7,8,10],
+    'дорийский':           [0,2,3,5,7,9,10],
+    'фригийский':          [0,1,3,5,7,8,10],
+    'целотонный':          [0,2,4,6,8,10],
+    'уменьшённый':         [0,2,3,5,6,8,9,11],
+    'хроматика':           [0,1,2,3,4,5,6,7,8,9,10,11],
+  },
+  quantOn: false, quantRoot: 0, quantScale: 'пентатоника (минор)',
+  /** Прижать частоту к ладу. Выключенный квантайзер возвращает её как есть —
+   *  ни один режим не должен знать, включён он или нет. */
+  quantHz(f){
+    if (!this.quantOn || !(f > 0) || !isFinite(f)) return f;
+    const sc = this.QUANT_SCALES[this.quantScale] || this.QUANT_SCALES['хроматика'];
+    const midi = 69 + 12*Math.log2(f/440);
+    let best = null, bd = 1e9;
+    const c = Math.round(midi);
+    for (let d = -7; d <= 7; d++){
+      const m = c + d;
+      const pc = (((m - this.quantRoot) % 12) + 12) % 12;
+      if (sc.indexOf(pc) < 0) continue;
+      const dist = Math.abs(m - midi);
+      if (dist < bd){ bd = dist; best = m; }
+    }
+    return best === null ? f : 440*Math.pow(2, (best-69)/12);
+  },
+  setQuant(on, root, scale){
+    if (on !== undefined) this.quantOn = !!on;
+    if (root !== undefined) this.quantRoot = root|0;
+    if (scale !== undefined) this.quantScale = scale;
+    if (!this.ctx) return;
+    // всё, что уже звучит, переезжает на новую сетку без пересоздания узлов
+    const t = this.ctx.currentTime;
+    this.harm.forEach((x,i)=>{ if (x._f) x.o.frequency.setTargetAtTime(this.quantHz(x._f), t, 0.08); });
+    for (const v of this.voices.values()){
+      v.o.frequency.setTargetAtTime(this.quantHz(this.baseHz*v.h), t, 0.08);
+      if (v.o2) v.o2.frequency.setTargetAtTime(
+        this.quantHz(this.baseHz*v.h*Math.pow(2, this.speciesDetune(v.sp)/1200)), t, 0.08);
+    }
+    for (const [key, node] of this.vocNodes)
+      if (node._f) node.o.frequency.setTargetAtTime(this.quantHz(node._f), t, 0.08);
+  },
+
   VOC_LO: 80, VOC_HI: 4000,
   VOC_GAMMA: 2.5,          // контраст плотностей
   VOC_MAX_VOICES: 20,      // сколько полос звучит разом
@@ -1182,11 +1242,11 @@ const Audio = {
     let node=this.vocNodes.get(key);
     if (!node){
       const ctx=this.ctx;
-      const o=ctx.createOscillator(); o.type=this.vocWave(sp); o.frequency.value=freq;
+      const o=ctx.createOscillator(); o.type=this.vocWave(sp); o.frequency.value=this.quantHz(freq);
       const g=ctx.createGain(); g.gain.value=0;
       const p=ctx.createStereoPanner();
       o.connect(g); g.connect(p); p.connect(this.busVo); o.start();
-      node={o,g,p,sp}; this.vocNodes.set(key,node);
+      node={o,g,p,sp,_f:freq}; this.vocNodes.set(key,node);
     }
     return node;
   },
@@ -1243,6 +1303,7 @@ const Audio = {
       if (!want.has(key)) node.g.gain.setTargetAtTime(0, t, 0.05);
     for (const [key, v] of want){
       const node=this.vocNode(key, v.hz, v.sp);
+      node._f=v.hz;
       node.p.pan.value=Math.max(-1,Math.min(1,(v.sp-(nsp+1)/2)/Math.max(nsp,1)*1.6));
       node.g.gain.setTargetAtTime(v.g, t, 0.04);
     }
@@ -1271,15 +1332,15 @@ const Audio = {
     if (this.sendNo) this.sendNo.gain.setTargetAtTime(on ? 0.35 : 0, t, 0.3);
     if (!on){
       // возвращаем полосы на плоский целочисленный ряд и глушим хоровые голоса
-      this.harm.forEach((x,i)=>{ const f=this.baseHz*(i+1); x.o.frequency.setTargetAtTime(f,t,0.3); x._f=f; });
+      this.harm.forEach((x,i)=>{ const f=this.baseHz*(i+1); x.o.frequency.setTargetAtTime(this.quantHz(f),t,0.3); x._f=f; });
       for (const v of this.voices.values()) if (v.g2) v.g2.gain.setTargetAtTime(0, t, 0.2);
     }
   },
   setBase(hz){ this.baseHz=hz; if(!this.ctx) return; const t=this.ctx.currentTime;
-    if (!this.colorful){ this.harm.forEach((x,i)=>{ const f=hz*(i+1); x.o.frequency.setTargetAtTime(f,t,0.05); x._f=f; }); }
+    if (!this.colorful){ this.harm.forEach((x,i)=>{ const f=hz*(i+1); x.o.frequency.setTargetAtTime(this.quantHz(f),t,0.05); x._f=f; }); }
     for (const v of this.voices.values()){
-      v.o.frequency.setTargetAtTime(hz*v.h, t, 0.05);
-      if (v.o2) v.o2.frequency.setTargetAtTime(hz*v.h*Math.pow(2, this.speciesDetune(v.sp)/1200), t, 0.05);
+      v.o.frequency.setTargetAtTime(this.quantHz(hz*v.h), t, 0.05);
+      if (v.o2) v.o2.frequency.setTargetAtTime(this.quantHz(hz*v.h*Math.pow(2, this.speciesDetune(v.sp)/1200)), t, 0.05);
     } },
   apply(sf){
     this.frame = sf;
@@ -1304,7 +1365,7 @@ const Audio = {
     for (let h=0; h<this.nb; h++){
       const f = this.colorful ? this.bandColorFreq(h, bandSp[h]||0) : this.baseHz*(h+1);
       if (Math.abs((this.harm[h]._f ?? f) - f) > 0.01){
-        this.harm[h].o.frequency.setTargetAtTime(f, t, 0.3); this.harm[h]._f = f;
+        this.harm[h].o.frequency.setTargetAtTime(this.quantHz(f), t, 0.3); this.harm[h]._f = f;
       }
       const a = f<sr2 ? sf.harmonics[h]/Math.sqrt(h+1) : 0;
       this.harm[h].g.gain.setTargetAtTime(a*0.25, t, tau);
@@ -1316,14 +1377,14 @@ const Audio = {
     for (const v of sf.voices){
       seen.add(v.vid); let node = this.voices.get(v.vid);
       if (!node){
-        const o=this.ctx.createOscillator(); o.type=this.waveOf(v.species); o.frequency.value=this.baseHz*v.harmonic;
+        const o=this.ctx.createOscillator(); o.type=this.waveOf(v.species); o.frequency.value=this.quantHz(this.baseHz*v.harmonic);
         const lfo=this.ctx.createOscillator(); lfo.frequency.value=5; const lg=this.ctx.createGain(); lg.gain.value=0;
         lfo.connect(lg); lg.connect(o.frequency); lfo.start();
         const g=this.ctx.createGain(); g.gain.value=0; const p=this.ctx.createStereoPanner(); p.pan.value=v.pan;
         o.connect(g); g.connect(p); p.connect(this.busV); o.start();
         // второй осциллятор — хор/детюн по виду, включён только в "Кристалле"
         const o2=this.ctx.createOscillator(); o2.type='sine';
-        o2.frequency.value=this.baseHz*v.harmonic*Math.pow(2, this.speciesDetune(v.species)/1200);
+        o2.frequency.value=this.quantHz(this.baseHz*v.harmonic*Math.pow(2, this.speciesDetune(v.species)/1200));
         const g2=this.ctx.createGain(); g2.gain.value=0;
         o2.connect(g2); g2.connect(p); o2.start();
         node={o,g,p,lg,h:v.harmonic,sp:v.species,o2,g2}; this.voices.set(v.vid,node);
@@ -1345,8 +1406,8 @@ const Audio = {
         // щелчком, ровно на интервале пересчёта организмов.
         node.h = v.harmonic;
         const gt = t + this.voiceJitter(v.vid);
-        node.o.frequency.setTargetAtTime(this.baseHz*v.harmonic, gt, 0.4);
-        node.o2.frequency.setTargetAtTime(this.baseHz*v.harmonic*Math.pow(2, this.speciesDetune(node.sp)/1200), gt, 0.4);
+        node.o.frequency.setTargetAtTime(this.quantHz(this.baseHz*v.harmonic), gt, 0.4);
+        node.o2.frequency.setTargetAtTime(this.quantHz(this.baseHz*v.harmonic*Math.pow(2, this.speciesDetune(node.sp)/1200)), gt, 0.4);
       }
       node.g.gain.setTargetAtTime(0.3*v.amp/Math.pow(v.harmonic,0.3), t, 0.15);
       node.g2.gain.setTargetAtTime(this.colorful ? 0.15*v.amp/Math.pow(v.harmonic,0.3) : 0, t, 0.15);
@@ -1584,8 +1645,11 @@ const Audio = {
     // Найквистом.
     const deg = this.PENTA[(sp-1) % this.PENTA.length];
     const oct = Math.round(z/n*2) - 1;
-    const rate = Math.min(6, Math.max(0.25,
+    let rate = Math.min(6, Math.max(0.25,
       Math.pow(2, oct + deg/12 + this.speciesDetune(sp)/1200) * (this.baseHz/55)));
+    // у зерна нет своей частоты — есть скорость чтения. Квантуем её через
+    // условную высоту: отношение квантованной к исходной и есть поправка
+    rate *= this.quantHz(this.baseHz*rate) / (this.baseHz*rate);
     src.playbackRate.value = rate;
     // ВАЖНО: третий аргумент start() — длительность во ВРЕМЕНИ БУФЕРА, а не
     // в реальном. Без домножения на rate зерно на высокой ноте кончалось
@@ -1750,12 +1814,12 @@ const Audio = {
     // в режиме «форма волны по видам» нота берёт волну вида, иначе — сэмпл,
     // собранный из генома (см. noteWave)
     if (this.waveMode) o.type=this.waveOf(sp); else o.setPeriodicWave(rec.wave);
-    o.frequency.value=f;
+    o.frequency.value=this.quantHz(f);
     // второй осциллятор, расстроенный по негармоничности — от него биения и
     // «металл» у видов с высоким inh; у тональных видов расстройка около нуля
     const o2=ctx.createOscillator();
     if (this.waveMode) o2.type=this.waveOf(sp); else o2.setPeriodicWave(rec.wave);
-    o2.frequency.value=f; o2.detune.value=T.inh*2600;
+    o2.frequency.value=this.quantHz(f); o2.detune.value=T.inh*2600;
     const g=ctx.createGain(), g2=ctx.createGain();
     g.gain.value=0; g2.gain.value=0.35;
     const p=ctx.createStereoPanner();
@@ -1847,6 +1911,22 @@ function waveControls(){
   }
 }
 $('waveMode').onchange = e=>{ Audio.setWaveMode(e.target.checked); waveControls(); };
+function quantControls(){
+  const on=$('quantOn').checked;
+  $('quantHint').style.display = on?'':'none';
+  $('quantBox').style.display = on?'':'none';
+  const r=$('quantRoot'), sc=$('quantScale');
+  if (!r.options.length){
+    Audio.QUANT_NOTES.forEach((nm,i)=>{ const o=document.createElement('option');
+      o.value=i; o.textContent=nm; if(i===Audio.quantRoot) o.selected=true; r.appendChild(o); });
+    Object.keys(Audio.QUANT_SCALES).forEach(nm=>{ const o=document.createElement('option');
+      o.value=nm; o.textContent=nm; if(nm===Audio.quantScale) o.selected=true; sc.appendChild(o); });
+  }
+}
+$('quantOn').onchange = e=>{ Audio.setQuant(e.target.checked); quantControls(); };
+$('quantRoot').onchange = e=>Audio.setQuant(undefined, +e.target.value);
+$('quantScale').onchange = e=>Audio.setQuant(undefined, undefined, e.target.value);
+quantControls();
 $('vocOn').onchange = e=>{ Audio.setVocoder(e.target.checked); $('vocHint').style.display = e.target.checked?'':'none'; };
 $('vocBands').oninput = e=>{ Audio.vocBands=+e.target.value; $('vocBandsLbl').textContent=e.target.value; };
 $('mixVo').oninput = e=>{ if (Audio.busVo) Audio.busVo.gain.value=+e.target.value; };
