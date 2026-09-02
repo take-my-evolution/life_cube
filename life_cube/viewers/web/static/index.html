@@ -158,6 +158,16 @@
   <div class="row muted">шагов в такте <b id="stepsLbl">16</b>
     <input id="steps" type="range" style="width:70px" min="4" max="32" step="4" value="16"></div>
   <div class="row muted">микс нот <input id="mixNo" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.8"></div>
+
+  <div class="row"><label class="sp"><input type="checkbox" id="vocOn"> Вокодер (вид сверху)</label></div>
+  <div class="row muted" id="vocHint" style="display:none">Куб проецируется по оси z: у каждого столбца берётся ВЕРХНИЙ живой вид.
+    Каждая строка проекции по y — своя частотная полоса (логарифмически 80…4000 Гц), громкость полосы —
+    плотность живых клеток в строке. В полосе не один синус, а сумма по видам: у каждого своя гармоника и
+    форма волны из той же геномной проекции, что кормит гранулы и ноты. Амплитуды обновляются НА КАЖДОМ
+    кадре симуляции, вместе с картинкой.</div>
+  <div class="row muted">полос <b id="vocBandsLbl">48</b>
+    <input id="vocBands" type="range" style="width:70px" min="8" max="96" step="8" value="48"></div>
+  <div class="row muted">микс вокодера <input id="mixVo" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.7"></div>
   <canvas id="waterfall" title="спектр-водопад: 64 полосы куба снизу вверх, время слева направо"></canvas>
 
   <h3>Геном</h3>
@@ -412,6 +422,10 @@ function rebuildInstances(){
   const up=(b,arr)=>{ gl.bindBuffer(gl.ARRAY_BUFFER,b); gl.bufferData(gl.ARRAY_BUFFER,arr.subarray?arr.subarray(0, arr===cell?o*3:o):arr, gl.DYNAMIC_DRAW); };
   up(B.cell, cell); up(B.sp, sp); up(B.lab, lab); up(B.size, size); up(B.kind, kind); up(B.height, hgt);
   instCount = o; liveCount = k;
+  // Вокодер обновляется ЗДЕСЬ, а не по своему таймеру: полосы читают ту же
+  // проекцию тех же клеток, что сейчас поехали в видеопамять, поэтому звук
+  // идёт строка в строку с картинкой и не отстаёт на такт.
+  Audio.vocoderTick();
 }
 
 // ------------------------------------------------------------------ камера
@@ -959,6 +973,11 @@ const Audio = {
   hannCurve: null, _grainTimer: null, _grainNext: 0, GRAIN_REF_HZ: 110,
   // ноты: ADSR-секвенсор (своя шина, кэш волновых форм, счётчик нот)
   noteOn: false, noteWaves: new Map(), notesPlayed: 0, busNo: null, sendNo: null,
+  // Вокодер «вид сверху»: строка проекции = частотная полоса, в полосе сумма
+  // по видам. Голоса живут в пуле по ключу «полоса:вид» и не пересоздаются:
+  // амплитуда правится на каждом кадре, а щёлкать на каждом кадре нельзя.
+  vocOn: false, vocBands: 48, vocNodes: new Map(), busVo: null, sendVo: null,
+  vocFrames: 0, vocLast: null,
   noiseBuf: null, _noteTimer: null, _noteNext: 0, _noteStep: 0,
   _popEma: null, _growth: null, _spread: null,
   PENTA: [0, 3, 5, 7, 10, 12, 15, 17, 19, 22],
@@ -1048,6 +1067,142 @@ const Audio = {
     this.sendNo = ctx.createGain(); this.sendNo.gain.value = 0;
     this.busNo.connect(this.sendNo); this.sendNo.connect(this.reverb);
     this.noiseBuf = buf;
+    // вокодер: своя шина и посыл в реверб
+    this.busVo = ctx.createGain(); this.busVo.gain.value = +$('mixVo').value;
+    this.busVo.connect(this.master);
+    this.sendVo = ctx.createGain(); this.sendVo.gain.value = 0;
+    this.busVo.connect(this.sendVo); this.sendVo.connect(this.reverb);
+  },
+
+  // --- вокодер «вид сверху» ------------------------------------------------
+  VOC_LO: 80, VOC_HI: 4000,
+  // ступени внутри полосы: виды складываются в аккорд, а не в биение
+  VOC_RATIOS: [1, 1.5, 2, 2.5, 3, 4],
+  /** Раздача «своя гармоника + своя форма» по видам.
+   *
+   *  Порядок задаёт геном (та же проекция, что кормит гранулы и ноты), а вот
+   *  сами слоты раздаются ПО РАНГУ, а не прямым хешем. Прямой хеш давал
+   *  коллизии: при шести ступенях и четырёх формах два вида регулярно
+   *  получали одну и ту же пару и в полосе сливались в один голос — ровно то,
+   *  ради чего эта сумма по видам и затевалась. Замер на «экологии» (8 видов):
+   *  4 полосы из 12 звучали одинаковыми голосами.
+   */
+  vocAssign(){
+    const nsp = Math.max(S.nsp||0, 1);
+    const key = (CFG.data && JSON.stringify(CFG.data.genomes)) || ('n'+nsp);
+    if (this._vocKey === key && this._vocMap) return this._vocMap;
+    const rank = [];
+    for (let sp=1; sp<=nsp; sp++){
+      const z = this.genomeZ(sp);
+      rank.push([sp, z ? this.geneProj(z, 10) : ((sp*0.37) % 1)]);
+    }
+    rank.sort((a,b)=> a[1]-b[1] || a[0]-b[0]);
+    // Слоты перебираем так, чтобы у соседей по рангу менялись И ступень, И
+    // форма: при обходе «сначала все ступени одной формы» первые шесть видов
+    // получали один и тот же синус, и тембрового различия не было вовсе —
+    // только высота.
+    const slots = [], NW = this.WAVES.length, NR = this.VOC_RATIOS.length;
+    for (let i = 0; i < NW * NR; i++) slots.push([this.VOC_RATIOS[i % NR], this.WAVES[i % NW]]);
+    const map = {};
+    rank.forEach(([sp], i)=>{ const [r,w] = slots[i % slots.length]; map[sp] = {ratio:r, wave:w}; });
+    this._vocKey = key; this._vocMap = map;
+    return map;
+  },
+  vocRatio(sp){ const a=this.vocAssign()[sp]; return a ? a.ratio : 1; },
+  vocWave(sp){
+    if (this.waveMode) return this.waveOf(sp);
+    const a=this.vocAssign()[sp];
+    return a ? a.wave : 'sine';
+  },
+  vocFreq(b, bands){
+    const t = bands > 1 ? b/(bands-1) : 0;
+    return this.VOC_LO * Math.pow(this.VOC_HI/this.VOC_LO, t);
+  },
+  /** Частота вида в полосе: гармоника вида, СВЁРНУТАЯ по октавам обратно в
+   *  диапазон полос. Без свёртки верхние полосы улетали за потолок (замер:
+   *  до 10577 Гц при заявленных 4000), а интервал между видами при этом
+   *  сохраняется — квинта остаётся квинтой, октава складывается сама в себя. */
+  vocVoiceFreq(base, sp){
+    let f = base * this.vocRatio(sp);
+    while (f > this.VOC_HI) f /= 2;
+    while (f < this.VOC_LO) f *= 2;
+    return f;
+  },
+  /** Проекция куба сверху: для каждого столбца — ВЕРХНИЙ живой вид, затем
+   *  плотность каждого вида по строкам y. Считается из тех же массивов, что
+   *  уходят в рендер, поэтому звук и картинка идут строка в строку. */
+  topProjection(){
+    const n=S.n, k=S.k, co=S.coords, spa=S.species;
+    if (!n || !k || !co || !spa) return null;
+    const topZ=new Int16Array(n*n).fill(-1), topS=new Uint8Array(n*n);
+    for (let i=0;i<k;i++){
+      const x=co[i*3], y=co[i*3+1], z=co[i*3+2], j=x*n+y;
+      if (z>topZ[j]){ topZ[j]=z; topS[j]=spa[i]; }
+    }
+    const nsp=Math.max(S.nsp||0, 1);
+    const dens=[];                       // dens[y][sp-1] = доля столбцов строки
+    for (let y=0;y<n;y++) dens.push(new Float32Array(nsp));
+    for (let x=0;x<n;x++) for (let y=0;y<n;y++){
+      const sp=topS[x*n+y];
+      if (sp>0 && sp<=nsp) dens[y][sp-1] += 1/n;
+    }
+    return dens;
+  },
+  vocNode(key, freq, sp){
+    let node=this.vocNodes.get(key);
+    if (!node){
+      const ctx=this.ctx;
+      const o=ctx.createOscillator(); o.type=this.vocWave(sp); o.frequency.value=freq;
+      const g=ctx.createGain(); g.gain.value=0;
+      const p=ctx.createStereoPanner();
+      o.connect(g); g.connect(p); p.connect(this.busVo); o.start();
+      node={o,g,p,sp}; this.vocNodes.set(key,node);
+    }
+    return node;
+  },
+  /** Один кадр вокодера. Зовётся из сборки геометрии — то есть ровно тогда,
+   *  когда меняется картинка, без своего такта и без задержки. */
+  vocoderTick(){
+    if (!this.on || !this.vocOn || !this.ctx) return;
+    const dens=this.topProjection(); if (!dens) return;
+    const n=dens.length, bands=Math.min(this.vocBands, n);
+    const per=n/bands, t=this.ctx.currentTime, nsp=dens[0].length;
+    const live=new Set();
+    let sum=0;
+    const amp=[];
+    for (let b=0;b<bands;b++){
+      const y0=Math.floor(b*per), y1=Math.max(y0+1, Math.floor((b+1)*per));
+      const row=new Float32Array(nsp);
+      for (let y=y0;y<y1;y++) for (let sp=0;sp<nsp;sp++) row[sp]+=dens[y][sp]/(y1-y0);
+      amp.push(row);
+      for (let sp=0;sp<nsp;sp++) sum+=row[sp];
+    }
+    // общая громкость не должна расти с числом полос: нормируем по сумме
+    const norm=0.9/Math.max(sum, 0.5);
+    for (let b=0;b<bands;b++){
+      const f=this.vocFreq(b,bands);
+      // высокие полосы субъективно громче — гасим по корню частоты
+      const w=Math.sqrt(this.VOC_LO/f);
+      for (let sp=1;sp<=nsp;sp++){
+        const a=amp[b][sp-1];
+        const key=b+':'+sp;
+        if (a<=0 && !this.vocNodes.has(key)) continue;
+        const node=this.vocNode(key, this.vocVoiceFreq(f, sp), sp);
+        live.add(key);
+        node.p.pan.value=Math.max(-1,Math.min(1,(sp-(nsp+1)/2)/Math.max(nsp,1)*1.6));
+        node.g.gain.setTargetAtTime(a*norm*w, t, 0.03);
+      }
+    }
+    this.vocFrames++;
+    this.vocLast={bands, amp};
+  },
+  setVocoder(on){
+    this.vocOn=!!on;
+    if (!this.ctx) return;
+    if (!on){
+      const t=this.ctx.currentTime;
+      for (const node of this.vocNodes.values()) node.g.gain.setTargetAtTime(0, t, 0.05);
+    } else this.vocoderTick();
   },
   setColorful(on){
     this.colorful = on;
@@ -1636,6 +1791,9 @@ function waveControls(){
   }
 }
 $('waveMode').onchange = e=>{ Audio.setWaveMode(e.target.checked); waveControls(); };
+$('vocOn').onchange = e=>{ Audio.setVocoder(e.target.checked); $('vocHint').style.display = e.target.checked?'':'none'; };
+$('vocBands').oninput = e=>{ Audio.vocBands=+e.target.value; $('vocBandsLbl').textContent=e.target.value; };
+$('mixVo').oninput = e=>{ if (Audio.busVo) Audio.busVo.gain.value=+e.target.value; };
 $('grainOn').onchange = e=>{ Audio.init(); Audio.setGrain(e.target.checked); };
 $('grainRate').oninput = e=>{ $('grainRateLbl').textContent = e.target.value; };
 $('grainMs').oninput = e=>{ $('grainMsLbl').textContent = e.target.value; };
@@ -1657,7 +1815,7 @@ const WF = { canvas: $('waterfall'), col: 0, w: 240, h: 64, ctx: null, img: null
 // --------------------------------------------- API для тестов и скриптов
 window.viewer = {
   S, gl, applyFrame, Audio, WF, CFG, COL, draw: ()=>{ dirty=false; draw(); },
-  send, labOpen, geneSliders, speciesButtons,
+  send, labOpen, geneSliders, speciesButtons, rebuildInstances,
   set(k,v){ S[k]=v; dirty=true; }, setView(v){ setView(v); dirty=true; },
   readPixels(){ resize(); draw(); const w=canvas.width,h=canvas.height; const px=new Uint8Array(w*h*4); gl.readPixels(0,0,w,h,gl.RGBA,gl.UNSIGNED_BYTE,px); return {w,h,px}; },
   // подсчёт пикселей по ближайшему цвету вида (для тестов): возвращает {bg, stone, s1..s4, other}

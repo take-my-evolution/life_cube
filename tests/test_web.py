@@ -958,3 +958,97 @@ def test_species_waveform_mode(page, server):
         assert page.evaluate("document.getElementById('waveBox').style.display") == "none"
     finally:
         page.click("#btnAudio")
+
+
+def test_vocoder_top_view(page, server):
+    """Вокодер «вид сверху»: строка проекции — полоса, в полосе сумма по видам.
+
+    Проверяем ровно то, ради чего он сделан: полосы читают ВЕРХНИЙ вид каждого
+    столбца, частоты лежат в заявленном диапазоне, виды в одной полосе звучат
+    разными голосами, а амплитуды пересчитываются вместе с кадром картинки, а
+    не по своему таймеру.
+    """
+    page.click("#btnAudio")
+    try:
+        page.check("#vocOn")
+        page.wait_for_timeout(500)
+        st = page.evaluate("""(() => {
+            const A = viewer.Audio, d = A.topProjection();
+            return {rows: d.length, n: viewer.S.n, nodes: A.vocNodes.size,
+                    frames: A.vocFrames,
+                    freqs: [...A.vocNodes.values()].map(v => v.o.frequency.value),
+                    lo: A.VOC_LO, hi: A.VOC_HI};
+        })()""")
+        assert st["rows"] == st["n"], "проекция не по всему кубу"
+        assert st["nodes"] > 0 and st["frames"] > 0
+        assert all(st["lo"] - 1e-6 <= f <= st["hi"] + 1e-6 for f in st["freqs"]), \
+            f"частоты вышли за {st['lo']}..{st['hi']}: {min(st['freqs'])}..{max(st['freqs'])}"
+
+        # проекция: верхний живой вид столбца, плотность по строкам 0..1
+        proj = page.evaluate("""(() => {
+            const A = viewer.Audio, S = viewer.S, n = S.n;
+            const top = new Int16Array(n*n).fill(-1), sp = new Uint8Array(n*n);
+            for (let i = 0; i < S.k; i++){
+                const x = S.coords[i*3], y = S.coords[i*3+1], z = S.coords[i*3+2], j = x*n+y;
+                if (z > top[j]) { top[j] = z; sp[j] = S.species[i]; }
+            }
+            const mine = A.topProjection();
+            let worst = 0, filled = 0;
+            for (let y = 0; y < n; y++){
+                const row = new Float64Array(mine[y].length);
+                for (let x = 0; x < n; x++){ const v = sp[x*n+y]; if (v > 0 && v <= row.length) row[v-1] += 1/n; }
+                for (let k = 0; k < row.length; k++){
+                    worst = Math.max(worst, Math.abs(row[k] - mine[y][k]));
+                    if (mine[y][k] > 0) filled++;
+                }
+            }
+            return {worst, filled};
+        })()""")
+        assert proj["worst"] < 1e-6, f"плотности не сходятся: {proj['worst']}"
+        assert proj["filled"] > 0, "в проекции нет ни одного живого вида"
+
+        # Виды обязаны звучать РАЗНО, иначе сумма по видам вырождается в
+        # вокодерный гул. Проверяем саму раздачу — она и есть гарантия;
+        # полагаться на то, что в кадре найдётся полоса с двумя видами, нельзя:
+        # мир в этом файле общий на все тесты и к этому моменту уже прорежен.
+        colour = page.evaluate("""(() => {
+            const A = viewer.Audio, m = A.vocAssign();
+            const keys = Object.keys(m).map(Number);
+            const pairs = keys.map(sp => A.vocRatio(sp) + '|' + A.vocWave(sp));
+            const by = new Map();
+            for (const [key, node] of A.vocNodes){
+                const b = key.split(':')[0];
+                if (!by.has(b)) by.set(b, []);
+                by.get(b).push(Math.round(node.o.frequency.value*100)/100 + '|' + node.o.type);
+            }
+            const shared = [...by.values()].filter(v => v.length > 1);
+            return {species: keys.length, distinct: new Set(pairs).size,
+                    waves: new Set(keys.map(sp => A.vocWave(sp))).size,
+                    slots: A.WAVES.length * A.VOC_RATIOS.length,
+                    shared: shared.length,
+                    sharedOk: shared.filter(v => new Set(v).size === v.length).length};
+        })()""")
+        assert colour["species"] > 1
+        assert colour["distinct"] == min(colour["species"], colour["slots"]), \
+            f"виды получили одинаковые голоса: {colour}"
+        if colour["species"] >= len(page.evaluate("viewer.Audio.WAVES")):
+            assert colour["waves"] > 1, "все виды на одной форме волны"
+        # а где две полосы всё же сошлись в кадре — там тоже без совпадений
+        assert colour["sharedOk"] == colour["shared"], colour
+
+        # амплитуды пересчитываются вместе с КАДРОМ, а не по своему таймеру
+        f0 = page.evaluate("viewer.Audio.vocFrames")
+        page.evaluate("viewer.rebuildInstances()")
+        assert page.evaluate("viewer.Audio.vocFrames") == f0 + 1
+
+        # мир на паузе: без нового кадра тик не идёт сам по себе
+        page.wait_for_timeout(500)
+        assert page.evaluate("viewer.Audio.vocFrames") == f0 + 1
+
+        page.uncheck("#vocOn")
+        page.wait_for_timeout(600)
+        loud = page.evaluate(
+            "[...viewer.Audio.vocNodes.values()].filter(v => v.g.gain.value > 0.01).length")
+        assert loud == 0, f"после выключения звучат {loud} полос"
+    finally:
+        page.click("#btnAudio")
