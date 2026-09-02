@@ -169,6 +169,12 @@ class Engine:
         if self.gen - last < every:
             return 0
         extinct = sum(pops) == 0
+        # «Вымирание» по умолчанию — пустой мир. Но в мире с пищевой цепью
+        # обвал одного звена необратим: хищник выел травоядных и издох, и
+        # дальше остаётся лес до конца времён. Движок может попросить считать
+        # событием и гибель ОТДЕЛЬНОГО вида (cfg.reseed_species).
+        if getattr(cfg, "reseed_species", False):
+            extinct = extinct or any(p == 0 for p in pops)
         if getattr(cfg, "reseed_on_extinction", True) and not extinct:
             return 0
         with self._lock:
