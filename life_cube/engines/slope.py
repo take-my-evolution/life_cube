@@ -63,12 +63,23 @@ COLORS = ("#9fb3a8", "#7bd94a", "#2e8b3d", "#4a9ef2", "#f24a9e")
 GENOMES = np.array([
     [0.55, 0.10, 0.0,  0,  0.40, 0.30, 0.006,  3.0,    0, 0.5, 0.0, 0, 0, 0, 0.90],  # мох
     [0.85, 0.22, 1.0,  0,  0.90, 0.00, 0.020,  0.8,  300, 1.0, 0.0, 0, 0, 0, 0.05],  # трава
-    [0.95, 0.50, 1.0,  5,  1.20, 0.00, 0.050,  1.6, 1200, 5.0, 0.0, 0, 0, 0, 0.85],  # дерево
+    [0.95, 0.50, 1.0,  5,  1.20, 0.00, 0.050,  1.6, 1200, 5.0, 0.0, 0, 0, 0, 0.95],  # дерево
     [0.00, 0.00, 0.0,  0,  0.00, 0.00, 0.015,  6.0,  400, 4.0, 0.15, 1, 1, 5, 0.45],  # травоядное
     [0.00, 0.00, 0.0,  0,  0.00, 0.00, 0.120,  8.0,  900, 6.0, 0.10, 2, 2, 7, 0.05],  # хищник
 ], dtype=np.float32)
 
 N_SPECIES = len(NAMES)
+
+# Кто в кого может ошибиться при делении. Это и есть «засев»: новая жизнь
+# приходит не кубиками, брошенными на карту, а сбоем размножения у того, кто
+# уже живёт. Пары — только по соседним ярусам: растение может дать травоядное,
+# травоядное — хищника, трава — дерево. Через ярус не прыгают.
+MUTATIONS = {
+    1: (4,),        # мох      -> травоядное
+    2: (3, 4),      # трава    -> дерево, травоядное
+    3: (4,),        # дерево   -> травоядное
+    4: (5,),        # травоядное -> хищник
+}
 
 
 @dataclass
@@ -102,6 +113,12 @@ class SlopeConfig:
     light_gain: float = 0.85
     water_gain: float = 0.5         # прибавка к ресурсу от воды
     crown_light: float = 0.35   # ниже этого света крона не разрастается
+    trunk_spacing: int = 3      # ближе этого стволы друг к другу не встают
+    seed_range: int = 6         # как далеко дерево роняет семя
+    seed_fall: float = 0.004    # шанс всхода на подходящем месте
+    seed_maturity: float = 1.2  # во сколько цен клетки кошелёк даёт семя
+    mutate_rate: float = 0.0015  # базовый шанс ошибки при делении
+    mutate_rescue: float = 60.0  # во сколько раз чаще, если ниша пуста
     crowd_max: int = 5
     p_shock: float = 0.0006
     start_energy: float = 4.0
@@ -112,7 +129,7 @@ class SlopeConfig:
     seed_animals: float = 0.020     # доля столбцов под травоядных
 
     start_species: tuple = ()
-    reseed: bool = True
+    reseed: bool = False        # засев теперь идёт мутацией, не кубиками на карте
     reseed_on_extinction: bool = True
     reseed_species: bool = True     # вернуть вид, выпавший из цепи
     reseed_every: int = 150
@@ -157,7 +174,9 @@ class SlopeRules(Rules):
     WORLD_PARAMS = ("n", "seed_world", "seed_mut", "stone_fraction", "hill_radius",
                     "hill_roughness", "rain_rate", "rain_amount", "rain_decay",
                     "water_flow", "soil_slide", "erode_rate", "growth_cost",
-                    "soil_start", "crown_light", "seed_density", "seed_tree",
+                    "soil_start", "crown_light", "trunk_spacing", "seed_range", "seed_fall", "seed_maturity",
+                    "mutate_rate", "mutate_rescue",
+                    "seed_density", "seed_tree",
                     "seed_animals", "p_shock")
     WORLD_RANGES = {"n": [32, 256, 32], "stone_fraction": [0.15, 0.7, 0.01],
                     "hill_radius": [0.3, 1.2, 0.05], "hill_roughness": [0.0, 0.8, 0.02],
@@ -165,7 +184,11 @@ class SlopeRules(Rules):
                     "rain_decay": [0.8, 0.999, 0.001], "soil_slide": [0.0, 1.0, 0.02],
                     "erode_rate": [0.0, 0.2, 0.002], "growth_cost": [1.0, 20.0, 0.5],
                     "seed_density": [0.005, 0.4, 0.005], "seed_tree": [0.0, 0.1, 0.002],
-                    "seed_animals": [0.0, 0.1, 0.002], "soil_start": [0.0, 3.0, 0.25], "crown_light": [0.05, 0.8, 0.05],
+                    "seed_animals": [0.0, 0.1, 0.002], "soil_start": [0.0, 3.0, 0.25], "crown_light": [0.05, 0.8, 0.05], "trunk_spacing": [0, 8, 1],
+                    "seed_range": [0, 16, 1], "seed_fall": [0.0, 0.05, 0.001],
+                    "seed_maturity": [1.0, 6.0, 0.1],
+                    "mutate_rate": [0.0, 0.02, 0.0005],
+                    "mutate_rescue": [1.0, 200.0, 5.0],
                     "water_flow": [0.0, 0.9, 0.05], "p_shock": [0.0, 0.01, 0.0002]}
     WORLD_LABELS = {"n": "размер куба", "seed_world": "сид мира", "seed_mut": "сид жизни",
                     "stone_fraction": "высота горы", "hill_radius": "радиус горы",
@@ -175,6 +198,12 @@ class SlopeRules(Rules):
                     "growth_cost": "цена роста (общая)", "water_flow": "вода стекает вниз",
                     "soil_start": "почвы в низинах на старте",
                     "crown_light": "света хватает кроне",
+                    "trunk_spacing": "просвет между стволами",
+                    "seed_range": "далеко ли летят семена",
+                    "seed_fall": "шанс всхода семени",
+                    "seed_maturity": "зрелость для семян",
+                    "mutate_rate": "шанс мутации при делении",
+                    "mutate_rescue": "во сколько раз чаще в пустой нише",
                     "seed_density": "плотность засева мха",
                     "seed_tree": "плотность засева деревьев",
                     "seed_animals": "плотность засева зверей",
@@ -242,7 +271,22 @@ class SlopeRules(Rules):
 
         put(bare, 1, cfg.seed_density)                    # мох
         put(ground, 2, cfg.seed_density * 3)              # трава
-        put(ground, 3, cfg.seed_tree)                     # дерево
+        # деревья и на старте расставляем с просветом, иначе первое поколение
+        # леса стоит стеной, а правило просвета видно только у их потомков
+        tree_spots = ground & (rng.random((n, n)) < cfg.seed_tree)
+        sp2 = int(cfg.trunk_spacing)
+        taken = np.zeros((n, n), bool)
+        for x, y in np.argwhere(tree_spots):
+            if taken[max(x - sp2, 0):x + sp2 + 1, max(y - sp2, 0):y + sp2 + 1].any():
+                continue
+            z = int(np.clip(surf[x, y], 0, n - 1))
+            if species[x, y, z]:
+                continue
+            g3 = cfg.genomes[2]
+            species[x, y, z] = 3
+            energy[x, y, z] = max(float(g3[IDX["repro"]]) * max(float(g3[IDX["mass"]]), 0.1)
+                                  * cfg.growth_cost * 0.6, 1.0)
+            taken[x, y] = True
         walk = surf + (species[np.arange(n)[:, None], np.arange(n)[None, :],
                                np.clip(surf, 0, n - 1)] > 0).astype(surf.dtype)
         put(~np.zeros((n, n), bool), 4, cfg.seed_animals, z=walk)        # травоядное
@@ -408,30 +452,35 @@ class SlopeRules(Rules):
         plants = alive & ~is_anim
         idx = xp.clip(species.astype(xp.int32) - 1, 0, N_SPECIES - 1)
 
-        # Крона держится на стволе, а не на воздухе. Ствол съели снизу или он
-        # умер от старости — всё, что было связано с землёй только через него,
-        # обваливается тем же шагом. Иначе в кадре висят зелёные кубы без
-        # опоры: замер на 150 поколении — 22 столбца дерева из 45 вообще без
-        # корня на подложке.
+        # Дерево — ОДИН организм, а не стопка независимых клеток. Помечаем
+        # каждую его клетку столбцом-корнем: крона держится на стволе, и всё,
+        # что потеряло связь с землёй, обваливается тем же шагом. Эта же метка
+        # даёт дереву общий кошелёк (см. ниже) — крона зарабатывает свет на всё
+        # дерево, а объеденная клетка бьёт по всему дереву, а не по себе одной.
         trunky = plants & gtrunk[idx]
+        tree_id = xp.zeros(species.shape, dtype=xp.int32)
         if bool(trunky.any()):
-            hold = trunky & (zz == surface[:, :, None])       # корни на подложке
-            for _ in range(int(np.asarray(cfg.genomes)[:, IDX["trunk"]].max())
-                           + int(round(float(np.asarray(cfg.genomes)[:, IDX["branch"]].max()) * 3)) + 2):
-                grown = hold.copy()
-                grown[:, :, 1:] |= hold[:, :, :-1]            # вверх по стволу
-                for dx, dy in self.DIRS2:                     # вбок по ветвям
-                    grown |= self._shift2(hold, dx, dy, xp)
-                grown = grown & trunky
-                if bool((grown == hold).all()):
+            cols = (xp.arange(n)[:, None] * n + xp.arange(n)[None, :] + 1).astype(xp.int32)
+            tree_id = xp.where(trunky & (zz == surface[:, :, None]), cols[:, :, None], 0)
+            reach = (int(np.asarray(cfg.genomes)[:, IDX["trunk"]].max())
+                     + int(round(float(np.asarray(cfg.genomes)[:, IDX["branch"]].max()) * 3)) + 2)
+            for _ in range(reach):
+                grown = tree_id.copy()
+                grown[:, :, 1:] = xp.maximum(grown[:, :, 1:], tree_id[:, :, :-1])   # вверх
+                for dx, dy in self.DIRS2:                                           # вбок
+                    grown = xp.maximum(grown, self._shift2(tree_id, dx, dy, xp))
+                grown = xp.where(trunky, grown, 0)
+                if bool((grown == tree_id).all()):
                     break
-                hold = grown
-            fell = trunky & ~hold
+                tree_id = grown
+            fell = trunky & (tree_id == 0)
             species = xp.where(fell, xp.uint8(0), species)
             energy = xp.where(fell, 0.0, energy)
+            trunky = trunky & ~fell
             alive = species > 0
             plants = alive & ~is_anim
             idx = xp.clip(species.astype(xp.int32) - 1, 0, N_SPECIES - 1)
+        state["tree_id"] = tree_id
 
         # похороненное подложкой гибнет
         buried = alive & (zz < surface[:, :, None])
@@ -462,11 +511,34 @@ class SlopeRules(Rules):
         metab = xp.where(plants, G[idx, IDX["metabolism"]], 0.0).astype(xp.float32)
         mass = xp.where(alive, xp.maximum(G[idx, IDX["mass"]], 0.1), 0.0).astype(xp.float32)
         cost = xp.where(plants, G[idx, IDX["repro"]] * mass * cfg.growth_cost, 0.0)
-        energy = xp.where(plants, xp.minimum(energy + R - metab, cost * cfg.energy_cap), energy)
+        flatp = plants & ~gtrunk[idx]
+        energy = xp.where(flatp, xp.minimum(energy + R - metab, cost * cfg.energy_cap), energy)
+
+        # Кошелёк дерева лежит в его корневой клетке: крона зарабатывает свет на
+        # всё дерево и на него же тратит. Поэтому объеденная крона бьёт по всему
+        # организму, а не по одной клетке, и дерево, у которого не осталось на
+        # что жить, гибнет целиком — вместе со стволом.
+        if bool(trunky.any()):
+            flat_id = tree_id.ravel()
+            nbin = int(n * n + 1)
+            gain = xp.bincount(flat_id, weights=(R - metab).ravel(), minlength=nbin)
+            root = trunky & (zz == surface[:, :, None])
+            rid = xp.where(root, tree_id, 0).ravel()
+            purse = xp.bincount(rid, weights=energy.ravel(), minlength=nbin)
+            cap = xp.bincount(flat_id, weights=(cost * cfg.energy_cap).ravel(), minlength=nbin)
+            purse = xp.minimum(purse + gain, xp.maximum(cap, 1.0))
+            purse[0] = 0.0
+            state["tree_purse"] = purse
+            energy = xp.where(root, purse[tree_id], xp.where(trunky, 0.0, energy))
+
         age = xp.where(alive, age + 1, 0)
         life = xp.where(alive, G[idx, IDX["lifespan"]], 0.0).astype(xp.float32)
         too_old = alive & (life > 0) & (age.astype(xp.float32) > life)
-        starved = plants & (energy <= 0)
+        starved = flatp & (energy <= 0)
+        if bool(trunky.any()):
+            # дерево без кошелька гибнет целиком, а не осыпается по клетке
+            broke = trunky & (state["tree_purse"][tree_id] <= 0)
+            starved = starved | broke
         shock = alive & (rng.random(species.shape) < cfg.p_shock)
         dead = too_old | starved | shock
         species = xp.where(dead, xp.uint8(0), species)
@@ -491,7 +563,15 @@ class SlopeRules(Rules):
         sp = state["species"]
         from ..backend import to_cpu
         counts = np.bincount(to_cpu(sp).ravel(), minlength=N_SPECIES + 1)
-        return [int(c) for c in counts[1:N_SPECIES + 1]]
+        pops = [int(c) for c in counts[1:N_SPECIES + 1]]
+        state["pops"] = pops
+        # «ниша» — сколько мест вид вообще может занять: по ним и меряем тесноту
+        soil_cols = int(to_cpu(soil_h > 0).sum())
+        bare_cols = int(cfg.n * cfg.n - soil_cols)
+        walk_cols = int(cfg.n * cfg.n)
+        state["niche"] = {1: bare_cols, 2: soil_cols, 3: max(soil_cols // 9, 1),
+                          4: walk_cols, 5: walk_cols}
+        return pops
 
     # ------------------------------------------------------------- рост
     def _grow(self, state, cfg, xp, correlate, rng, species, energy, age,
@@ -516,6 +596,22 @@ class SlopeRules(Rules):
             K1 = xp.ones((3, 3, 3), dtype=xp.float32); K1[1, 1, 1] = 0
             state["k1"] = K1
 
+        # столбцы, где новый ствол вставать не должен: рядом уже есть чужой
+        gtr = np.asarray(cfg.genomes)[:, IDX["trunk"]] > 0
+        trunk_block = None
+        r = int(cfg.trunk_spacing)
+        if r > 0 and gtr.any():
+            trunks = xp.zeros((n, n), dtype=xp.float32)
+            for si in np.nonzero(gtr)[0]:
+                trunks = trunks + ((species == int(si) + 1) & (zz == surf3)
+                                   ).any(axis=2).astype(xp.float32)
+            disc = state.get("_disc")
+            if disc is None or disc.shape[0] != 2 * r + 1:
+                ax = xp.arange(-r, r + 1)
+                disc = ((ax[:, None] ** 2 + ax[None, :] ** 2) <= r * r).astype(xp.float32)
+                state["_disc"] = disc
+            trunk_block = (correlate(trunks, disc, mode="constant", cval=0.0) > 0)[:, :, None]
+
         for s in [i + 1 for i in range(N_SPECIES)]:
             g = cfg.genomes[s - 1]
             if float(g[IDX["speed"]]) > 0:
@@ -527,12 +623,43 @@ class SlopeRules(Rules):
             emine = correlate(xp.where(mine_mask, energy, 0.0).astype(xp.float32), K1,
                               mode="constant", cval=0.0)
             cost_s = float(g[IDX["repro"]]) * max(float(g[IDX["mass"]]), 0.1) * cfg.growth_cost
-            rich = (emine / xp.maximum(mine, 1e-6)) > cost_s
+            tree_id = state.get("tree_id")
+            purse = state.get("tree_purse")
+            as_one = (float(g[IDX["trunk"]]) > 0 and tree_id is not None
+                      and purse is not None and bool(mine_mask.any()))
+            if as_one:
+                # У дерева общий кошелёк: новую клетку оплачивает весь организм,
+                # а не средняя энергия соседей вокруг точки роста. Пустая клетка
+                # своего номера ещё не имеет — берём номер дерева, к которому она
+                # прирастает (максимум по соседям): именно оно и заплатит.
+                owner = tree_id.copy()
+                owner[:, :, :-1] = xp.maximum(owner[:, :, :-1], tree_id[:, :, 1:])
+                owner[:, :, 1:] = xp.maximum(owner[:, :, 1:], tree_id[:, :, :-1])
+                for dx, dy in self.DIRS2:
+                    owner = xp.maximum(owner, self._shift2(tree_id, dx, dy, xp))
+                rich = purse[owner] > cost_s
+            else:
+                rich = (emine / xp.maximum(mine, 1e-6)) > cost_s
 
             wants_soil = float(g[IDX["substrate"]]) >= 0.5
             trunk = int(g[IDX["trunk"]])
             at_surface = empty & (zz == surf3)
             substrate_ok = at_surface & (on_soil if wants_soil else ~on_soil)
+            if int(g[IDX["trunk"]]) > 0 and as_one:
+                # Ствол вплотную к чужому не встаёт, а рождение шло только
+                # вплотную к своим клеткам — значит новому стволу взяться
+                # неоткуда вовсе. Дерево роняет СЕМЯ: взрослое (кошелёк тянет
+                # больше двух клеток) сеет в радиусе `seed_range` на свободную
+                # почву и платит за всходы из своего кошелька.
+                species, energy, age = self._seed_fall(
+                    state, cfg, xp, correlate, rng, species, energy, age,
+                    s, g, cost_s, tree_id, purse, surface, soil_h, zz)
+            if int(g[IDX["trunk"]]) > 0 and trunk_block is not None:
+                # Новый ствол не встаёт вплотную к чужому: лес из деревьев,
+                # стоящих плечом к плечу, — это сплошная стена, а не лес. Заодно
+                # кроны соседей перестают перекрываться, и каждое дерево
+                # остаётся отдельным организмом со своим кошельком.
+                substrate_ok = substrate_ok & ~trunk_block
 
             if trunk > 0:
                 # ствол: клетка прямо над своей же, пока не выросли `trunk`
@@ -540,7 +667,6 @@ class SlopeRules(Rules):
                 below_mine[:, :, 1:] = mine_mask[:, :, :-1]
                 height = zz - surf3
                 up = empty & below_mine & (height <= trunk) & on_soil
-                # крона: вбок, но только выше ствола и рядом со своими
                 # крона: вбок, но только в пределах нескольких ярусов над
                 # стволом — иначе дерево растёт в высоту без предела и лес
                 # превращается в сплошной куб
@@ -557,12 +683,144 @@ class SlopeRules(Rules):
             if not bool(born.any()):
                 continue
             species = xp.where(born, xp.uint8(s), species)
-            energy = xp.where(born, xp.float32(cost_s * 0.5), energy)
             age = xp.where(born, xp.int32(0), age)
-            # за постройку платят соседи-родители
-            paid = correlate(xp.where(born, xp.float32(cost_s), 0.0).astype(xp.float32),
-                             K1, mode="constant", cval=0.0) / float(K1.sum())
-            energy = xp.where(mine_mask, xp.maximum(energy - paid, 0.0), energy)
+            if as_one:
+                # платит кошелёк дерева; новая клетка сама по себе пустая
+                energy = xp.where(born, 0.0, energy)
+                # свежая клетка сразу получает номер своего дерева: иначе до
+                # следующего шага она числится ничьей, и счётчик организмов
+                # (да и всякий, кто смотрит в состояние) видит неправду
+                state["tree_id"] = xp.where(born, owner, tree_id)
+                tree_id = state["tree_id"]
+                nbin = int(cfg.n * cfg.n + 1)
+                bill = xp.bincount(xp.where(born, owner, 0).ravel(),
+                                   minlength=nbin).astype(xp.float32) * xp.float32(cost_s)
+                bill[0] = 0.0
+                # кошелёк лежит в корневой клетке — с неё и списываем
+                root_here = mine_mask & (tree_id > 0) & (energy > 0)
+                energy = xp.where(root_here,
+                                  xp.maximum(energy - bill[tree_id], 0.0), energy)
+            else:
+                energy = xp.where(born, xp.float32(cost_s * 0.5), energy)
+                # за постройку платят соседи-родители
+                paid = correlate(xp.where(born, xp.float32(cost_s), 0.0).astype(xp.float32),
+                                 K1, mode="constant", cval=0.0) / float(K1.sum())
+                energy = xp.where(mine_mask, xp.maximum(energy - paid, 0.0), energy)
+            # родитель заплатил за клетку — а выросло из неё не всегда своё
+            species, energy, age = self._mutate(
+                state, cfg, xp, rng, species, energy, age, s, born, surf3, zz,
+                crowded=trunk_block)
+        return species, energy, age
+
+    def mutation_chance(self, state, cfg, src, dst):
+        """Шанс, что клетка вида `src` при делении даст клетку вида `dst`.
+
+        Две поправки к базовому шансу, обе по просьбе «засев должен идти через
+        мутацию, а не кубиками на карте»:
+
+        * ТЕСНОТА. Чем полнее вид занял свою нишу, тем чаще он ошибается. Трава,
+          выевшая всю доступную землю, чаще даёт травоядное — ровно тогда, когда
+          травоядному есть что есть.
+        * ПУСТАЯ НИША. Если вида `dst` в мире не осталось вовсе, шанс взлетает в
+          `mutate_rescue` раз. Это и есть спасательный круг: цепь
+          восстанавливается сама, изнутри живого, а не подсевом снаружи.
+
+        Условием пустая ниша НЕ является: мир, где все пять видов на месте, всё
+        равно изредка порождает чужаков.
+        """
+        pops = state.get("pops")
+        if pops is None or cfg.mutate_rate <= 0:
+            return 0.0
+        p = float(cfg.mutate_rate)
+        room = max(int(state.get("niche", {}).get(src, 0)), 1)
+        crowd = min(pops[src - 1] / room, 1.0)
+        p *= 0.15 + 0.85 * crowd
+        if pops[dst - 1] <= 0:
+            p *= float(cfg.mutate_rescue)
+        else:
+            # чем гуще целевой вид, тем реже к нему мутируют
+            p *= 1.0 / (1.0 + pops[dst - 1] / max(room * 0.05, 1.0))
+        return min(p, 0.5)
+
+    def _mutate(self, state, cfg, xp, rng, species, energy, age, src, born,
+                surf3, zz, crowded=None):
+        """Часть новорождённых вида `src` выходит чужим видом."""
+        out = born
+        for dst in MUTATIONS.get(src, ()):
+            p = self.mutation_chance(state, cfg, src, dst)
+            if p <= 0:
+                continue
+            g = cfg.genomes[dst - 1]
+            pick = out & (zz == surf3) & (rng.random(species.shape) < p)
+            if float(g[IDX["trunk"]]) > 0 and crowded is not None:
+                pick = pick & ~crowded          # ствол вплотную к чужому не встаёт
+            if not bool(pick.any()):
+                continue
+            if float(g[IDX["speed"]]) > 0:
+                e = float(g[IDX["repro"]]) * 0.7
+            else:
+                e = float(g[IDX["repro"]]) * max(float(g[IDX["mass"]]), 0.1) \
+                    * cfg.growth_cost * 0.5
+            species = xp.where(pick, xp.uint8(dst), species)
+            energy = xp.where(pick, xp.float32(max(e, 1.0)), energy)
+            age = xp.where(pick, xp.int32(0), age)
+            out = out & ~pick
+        return species, energy, age
+
+    def _seed_fall(self, state, cfg, xp, correlate, rng, species, energy, age,
+                   sid, g, cost_s, tree_id, purse, surface, soil_h, zz):
+        """Взрослое дерево роняет семя в радиусе нескольких клеток.
+
+        Всё считается по поверхности (2D): у каждого столбца одна точка роста,
+        и объёмный поиск тут не нужен. Семя ложится только на свободную почву,
+        не ближе `trunk_spacing` к чужому стволу, а платит за него то дерево,
+        чей номер дотянулся до этой клетки, — из общего кошелька.
+        """
+        n = cfg.n
+        rng_seed = int(cfg.seed_range)
+        if rng_seed <= 0:
+            return species, energy, age
+        surf3 = surface[:, :, None]
+        root = (species == sid) & (zz == surf3)
+        root2d = xp.where(root.any(axis=2), xp.max(xp.where(root, tree_id, 0), axis=2), 0)
+        # взрослое = кошелёк тянет больше двух клеток: одну потратит на семя,
+        # на другую будет расти само
+        adult = xp.where(root2d > 0, purse[root2d] > cost_s * cfg.seed_maturity, False)
+        src = xp.where(adult, root2d, 0).astype(xp.int32)
+        if not bool((src > 0).any()):
+            return species, energy, age
+        for _ in range(rng_seed):                     # разлёт: максимум по кругу
+            grown = src
+            for dx, dy in self.DIRS2:
+                grown = xp.maximum(grown, self._shift2(src, dx, dy, xp))
+            src = grown
+        surf_cell = (zz == surf3)
+        free = (~(species > 0) & surf_cell).any(axis=2)
+        spacing = int(cfg.trunk_spacing)
+        blocked = xp.zeros((n, n), dtype=bool)
+        if spacing > 0:
+            trunks2d = ((species == sid) & surf_cell).any(axis=2).astype(xp.float32)
+            ax = xp.arange(-spacing, spacing + 1)
+            disc = ((ax[:, None] ** 2 + ax[None, :] ** 2) <= spacing * spacing).astype(xp.float32)
+            blocked = correlate(trunks2d, disc, mode="constant", cval=0.0) > 0
+        spot = (src > 0) & free & (soil_h > 0) & ~blocked
+        spot = spot & (rng.random((n, n)) < cfg.seed_fall)
+        if not bool(spot.any()):
+            return species, energy, age
+        nbin = int(n * n + 1)
+        bill = xp.bincount(xp.where(spot, src, 0).ravel(),
+                           minlength=nbin).astype(xp.float32) * xp.float32(cost_s)
+        bill[0] = 0.0
+        born = spot[:, :, None] & surf_cell & ~(species > 0)
+        species = xp.where(born, xp.uint8(sid), species)
+        age = xp.where(born, xp.int32(0), age)
+        # всход получает половину цены клетки, вторая половина — расход родителя
+        energy = xp.where(born, xp.float32(cost_s * 0.5), energy)
+        # всход — уже отдельный организм: номер по его собственному столбцу
+        cols = (xp.arange(n)[:, None] * n + xp.arange(n)[None, :] + 1).astype(xp.int32)
+        state["tree_id"] = xp.where(born, cols[:, :, None], tree_id)
+        pay = root & (tree_id > 0)
+        energy = xp.where(pay, xp.maximum(energy - bill[tree_id], 0.0), energy)
         return species, energy, age
 
     # ------------------------------------------------------------- животные
@@ -641,7 +899,12 @@ class SlopeRules(Rules):
             span = float(attract.max() - attract.min())
             noise_amp = cfg.move_noise * (span if span > 0 else 1.0)
             prey_mask = np.isin(sp, prey_sp) if prey_sp else np.zeros(sp.shape, bool)
-            prey_z = np.where(prey_mask.any(axis=2), prey_mask.argmax(axis=2), -1)
+            # ВЕРХНЯЯ клетка добычи, а не нижняя: травоядное объедает крону
+            # сверху и спускается по мере объедания. Раньше оно ело самую
+            # нижнюю — то есть основание ствола, — и целое дерево валилось с
+            # одного укуса.
+            prey_z = np.where(prey_mask.any(axis=2),
+                              sp.shape[2] - 1 - prey_mask[:, :, ::-1].argmax(axis=2), -1)
             rng_cpu = np.random.default_rng((cfg.seed_mut ^ (s * 7919)) + int(state["gen"]))
             for (x, y, z) in here:
                 if sp[x, y, z] != s:
@@ -690,7 +953,8 @@ class SlopeRules(Rules):
                         if victim == 0:            # карта отстала: добычу уже съели
                             prey_mask[nx, ny, pz] = False
                             col = prey_mask[nx, ny]
-                            prey_z[nx, ny] = col.argmax() if col.any() else -1
+                            prey_z[nx, ny] = (len(col) - 1 - col[::-1].argmax()
+                                              if col.any() else -1)
                             continue
                         armor = float(G[victim - 1][IDX["armor"]])
                         if rng_cpu.random() > hunt * (1 - armor):
@@ -699,7 +963,8 @@ class SlopeRules(Rules):
                         sp[nx, ny, pz], en[nx, ny, pz], ag[nx, ny, pz] = 0, 0.0, 0
                         prey_mask[nx, ny, pz] = False
                         col = prey_mask[nx, ny]
-                        prey_z[nx, ny] = col.argmax() if col.any() else -1
+                        prey_z[nx, ny] = (len(col) - 1 - col[::-1].argmax()
+                                          if col.any() else -1)
                         break
                 # обмен, смерть, деление
                 en[x, y, z] -= float(g[IDX["metabolism"]])
@@ -715,7 +980,17 @@ class SlopeRules(Rules):
                         if sp[nx, ny, nz] != 0:
                             continue
                         en[x, y, z] *= 0.5
-                        sp[nx, ny, nz], en[nx, ny, nz], ag[nx, ny, nz] = s, en[x, y, z], 0
+                        # потомок не всегда выходит своим видом: так в мире
+                        # заводится хищник, если хищников не осталось
+                        child = s
+                        for dst in MUTATIONS.get(s, ()):
+                            if rng_cpu.random() < self.mutation_chance(state, cfg, s, dst):
+                                child = dst
+                                break
+                        e0 = en[x, y, z]
+                        if child != s:
+                            e0 = max(float(G[child - 1][IDX["repro"]]) * 0.7, 1.0)
+                        sp[nx, ny, nz], en[nx, ny, nz], ag[nx, ny, nz] = child, e0, 0
                         break
         state["species"] = xp.asarray(sp)
         state["energy"] = xp.asarray(en)
@@ -771,6 +1046,24 @@ class SlopeRules(Rules):
 
     def species_colors(self, cfg):
         return list(COLORS)
+
+    def species_organisms(self, cfg, state=None):
+        """Клетка = организм для всех, кроме деревьев: у дерева ствол и крона —
+        один организм, и одно дерево не должно весить как двадцать травинок."""
+        pops = (state or {}).get("pops")
+        if pops is None:
+            return None
+        out = list(pops)
+        tid = (state or {}).get("tree_id")
+        if tid is not None:
+            from ..backend import to_cpu
+            t = to_cpu(tid)
+            ntree = int(np.unique(t[t > 0]).size)
+            for i, g in enumerate(np.asarray(cfg.genomes)):
+                if g[IDX["trunk"]] > 0:
+                    out[i] = ntree
+                    break
+        return [int(v) for v in out]
 
     def species_mass(self, cfg):
         g = np.asarray(cfg.genomes)
