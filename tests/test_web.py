@@ -984,6 +984,41 @@ def test_vocoder_top_view(page, server):
         assert all(st["lo"] - 1e-6 <= f <= st["hi"] + 1e-6 for f in st["freqs"]), \
             f"частоты вышли за {st['lo']}..{st['hi']}: {min(st['freqs'])}..{max(st['freqs'])}"
 
+        # Все голоса стоят на ОДНОЙ ступенчатой сетке лада. Это и отличает
+        # аккорд от шума: пока полосы и виды считались в полутонах и в
+        # отношениях частот, половина голосов попадала между ступенями и билась
+        # о соседей — «звучит как шум, словно спектр сжат».
+        grid = page.evaluate("""(() => {
+            const A = viewer.Audio, g = [];
+            for (let i = 0; i < A.vocSteps(); i++) g.push(A.vocStepHz(i));
+            const off = [...A.vocNodes.values()]
+                .map(n => n.o.frequency.value)
+                .filter(f => !g.some(x => Math.abs(x - f) < 0.51));
+            return {steps: g.length, off: off.length};
+        })()""")
+        assert grid["steps"] > 8
+        assert grid["off"] == 0, f"{grid['off']} голосов стоят между ступенями лада"
+
+        # Одновременно звучит ОГРАНИЧЕННОЕ число полос, и они разные по
+        # громкости: вокодер — это несколько выразительных голосов, а не
+        # гребёнка из всего, что горит (замер до починки: 123 тона на почти
+        # одинаковом уровне — шум по определению).
+        #
+        # Смотрим НАЗНАЧЕННЫЕ цели, а не gain.value: в headless звуковой
+        # контекст может остаться усыплённым, и тогда setTargetAtTime не
+        # доезжает — проверка мерила бы не поведение, а состояние контекста.
+        loud = page.evaluate("""(() => {
+            const L = viewer.Audio.vocLast;
+            const g = L.targets.map(t => t.g).sort((a, b) => b - a);
+            return {n: g.length, max: g[0] || 0, med: g[Math.floor(g.length/2)] || 0,
+                    cap: viewer.Audio.VOC_MAX_VOICES, voices: L.voices};
+        })()""")
+        assert 0 < loud["n"] <= loud["cap"], loud
+        # порог мягкий нарочно: сколько полос горит, зависит от мира. Замеры —
+        # густой мир (n=48) даёт отношение 9.5, разреженный мир этого файла 2.7;
+        # ровный ковёр, ради ухода от которого всё и делалось, дал бы около 1
+        assert loud["max"] > 2 * loud["med"], loud
+
         # проекция: верхний живой вид столбца, плотность по строкам 0..1
         proj = page.evaluate("""(() => {
             const A = viewer.Audio, S = viewer.S, n = S.n;

@@ -165,8 +165,8 @@
     плотность живых клеток в строке. В полосе не один синус, а сумма по видам: у каждого своя гармоника и
     форма волны из той же геномной проекции, что кормит гранулы и ноты. Амплитуды обновляются НА КАЖДОМ
     кадре симуляции, вместе с картинкой.</div>
-  <div class="row muted">полос <b id="vocBandsLbl">48</b>
-    <input id="vocBands" type="range" style="width:70px" min="8" max="96" step="8" value="48"></div>
+  <div class="row muted">полос <b id="vocBandsLbl">24</b>
+    <input id="vocBands" type="range" style="width:70px" min="8" max="96" step="8" value="24"></div>
   <div class="row muted">микс вокодера <input id="mixVo" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.7"></div>
   <canvas id="waterfall" title="спектр-водопад: 64 полосы куба снизу вверх, время слева направо"></canvas>
 
@@ -976,7 +976,7 @@ const Audio = {
   // Вокодер «вид сверху»: строка проекции = частотная полоса, в полосе сумма
   // по видам. Голоса живут в пуле по ключу «полоса:вид» и не пересоздаются:
   // амплитуда правится на каждом кадре, а щёлкать на каждом кадре нельзя.
-  vocOn: false, vocBands: 48, vocNodes: new Map(), busVo: null, sendVo: null,
+  vocOn: false, vocBands: 24, vocNodes: new Map(), busVo: null, sendVo: null,
   vocFrames: 0, vocLast: null,
   noiseBuf: null, _noteTimer: null, _noteNext: 0, _noteStep: 0,
   _popEma: null, _growth: null, _spread: null,
@@ -1069,15 +1069,26 @@ const Audio = {
     this.noiseBuf = buf;
     // вокодер: своя шина и посыл в реверб
     this.busVo = ctx.createGain(); this.busVo.gain.value = +$('mixVo').value;
-    this.busVo.connect(this.master);
+    // Пила и квадрат тянут обертоны до самого верха, и энергия размазывалась
+    // по всему спектру (замер: центроид 3694 Гц при полосах до 4000). Мягкий
+    // срез оставляет тембр видов различимым, но убирает шипение.
+    this.vocLP = ctx.createBiquadFilter(); this.vocLP.type='lowpass';
+    this.vocLP.frequency.value = 2600; this.vocLP.Q.value = 0.7;
+    this.busVo.connect(this.vocLP); this.vocLP.connect(this.master);
     this.sendVo = ctx.createGain(); this.sendVo.gain.value = 0;
-    this.busVo.connect(this.sendVo); this.sendVo.connect(this.reverb);
+    this.vocLP.connect(this.sendVo); this.sendVo.connect(this.reverb);
   },
 
   // --- вокодер «вид сверху» ------------------------------------------------
   VOC_LO: 80, VOC_HI: 4000,
-  // ступени внутри полосы: виды складываются в аккорд, а не в биение
-  VOC_RATIOS: [1, 1.5, 2, 2.5, 3, 4],
+  VOC_GAMMA: 2.5,          // контраст плотностей
+  VOC_MAX_VOICES: 20,      // сколько полос звучит разом
+  VOC_LEVEL: 0.45,         // общий уровень шины
+  VOC_PREF: 0.35,          // опорная мощность кадра
+  PENTA5: [0, 3, 5, 7, 10],
+  // Сдвиг вида внутри полосы — в СТУПЕНЯХ лада, а не в полутонах и не
+  // отношением частот: только так голос остаётся на общей решётке.
+  VOC_RATIOS: [0, 2, 4, 1, 3, 5],
   /** Раздача «своя гармоника + своя форма» по видам.
    *
    *  Порядок задаёт геном (та же проекция, что кормит гранулы и ноты), а вот
@@ -1114,19 +1125,38 @@ const Audio = {
     const a=this.vocAssign()[sp];
     return a ? a.wave : 'sine';
   },
-  vocFreq(b, bands){
-    const t = bands > 1 ? b/(bands-1) : 0;
-    return this.VOC_LO * Math.pow(this.VOC_HI/this.VOC_LO, t);
+  /** Полосы и виды живут на ОДНОЙ ступенчатой сетке лада.
+   *
+   *  Полоса адресуется не частотой, а НОМЕРОМ СТУПЕНИ; вид внутри полосы —
+   *  сдвигом на целое число ступеней. Так любой голос гарантированно попадает
+   *  на ту же решётку, и биться друг о друга им нечем.
+   *
+   *  Через полутона это не выходит: пентатоника не замкнута относительно
+   *  переноса (прибавь 7 полутонов к ступени 5 — попадёшь в 0 следующей
+   *  октавы, а прибавь к ступени 3 — уже мимо лада). Замер ловил это как пики
+   *  118/129/140/151 Гц: половина голосов стояла между ступенями, и на слух
+   *  оставался тот же шум.
+   */
+  vocSteps(){ return Math.max(2, Math.round(Math.log2(this.VOC_HI/this.VOC_LO) * this.PENTA5.length)); },
+  vocStepHz(i){
+    const m = this.PENTA5.length;
+    const oct = Math.floor(i/m), deg = this.PENTA5[((i % m) + m) % m];
+    return this.VOC_LO * Math.pow(2, oct + deg/12);
   },
-  /** Частота вида в полосе: гармоника вида, СВЁРНУТАЯ по октавам обратно в
-   *  диапазон полос. Без свёртки верхние полосы улетали за потолок (замер:
-   *  до 10577 Гц при заявленных 4000), а интервал между видами при этом
-   *  сохраняется — квинта остаётся квинтой, октава складывается сама в себя. */
-  vocVoiceFreq(base, sp){
-    let f = base * this.vocRatio(sp);
-    while (f > this.VOC_HI) f /= 2;
-    while (f < this.VOC_LO) f *= 2;
-    return f;
+  vocFreq(b, bands){
+    const steps = this.vocSteps();
+    const t = bands > 1 ? b/(bands-1) : 0;
+    return Math.round(t * (steps - 1));          // НОМЕР ступени, не частота
+  },
+  /** Частота голоса вида в полосе: ступень полосы плюс сдвиг вида, СВЁРНУТЫЙ
+   *  обратно в диапазон. Без свёртки верхние полосы улетали за потолок —
+   *  замер показывал 10577 Гц при заявленных 4000. */
+  vocVoiceFreq(step, sp){
+    const steps = this.vocSteps();
+    let i = step + this.vocRatio(sp);
+    while (i >= steps) i -= this.PENTA5.length;   // на октаву вниз
+    while (i < 0) i += this.PENTA5.length;
+    return this.vocStepHz(i);
   },
   /** Проекция куба сверху: для каждого столбца — ВЕРХНИЙ живой вид, затем
    *  плотность каждого вида по строкам y. Считается из тех же массивов, что
@@ -1167,34 +1197,60 @@ const Audio = {
     const dens=this.topProjection(); if (!dens) return;
     const n=dens.length, bands=Math.min(this.vocBands, n);
     const per=n/bands, t=this.ctx.currentTime, nsp=dens[0].length;
-    const live=new Set();
-    let sum=0;
+    // 1. плотности по полосам
     const amp=[];
     for (let b=0;b<bands;b++){
       const y0=Math.floor(b*per), y1=Math.max(y0+1, Math.floor((b+1)*per));
       const row=new Float32Array(nsp);
       for (let y=y0;y<y1;y++) for (let sp=0;sp<nsp;sp++) row[sp]+=dens[y][sp]/(y1-y0);
       amp.push(row);
-      for (let sp=0;sp<nsp;sp++) sum+=row[sp];
     }
-    // общая громкость не должна расти с числом полос: нормируем по сумме
-    const norm=0.9/Math.max(sum, 0.5);
-    for (let b=0;b<bands;b++){
-      const f=this.vocFreq(b,bands);
-      // высокие полосы субъективно громче — гасим по корню частоты
-      const w=Math.sqrt(this.VOC_LO/f);
-      for (let sp=1;sp<=nsp;sp++){
-        const a=amp[b][sp-1];
-        const key=b+':'+sp;
-        if (a<=0 && !this.vocNodes.has(key)) continue;
-        const node=this.vocNode(key, this.vocVoiceFreq(f, sp), sp);
-        live.add(key);
-        node.p.pan.value=Math.max(-1,Math.min(1,(sp-(nsp+1)/2)/Math.max(nsp,1)*1.6));
-        node.g.gain.setTargetAtTime(a*norm*w, t, 0.03);
-      }
+    // 2. КОНТРАСТ, но ОТНОСИТЕЛЬНЫЙ. Плотности почти всюду ненулевые, и без
+    //    контраста звучат разом все полосы на одном уровне — это и есть шум по
+    //    определению (замер: 123 узла, максимум 0.019, медиана 0.0019).
+    //    Степень берётся от доли к самой густой полосе кадра, а не от
+    //    абсолютной плотности: абсолютная в степени 2.5 глушила редко
+    //    населённый мир НАЦЕЛО (плотность 0.05 даёт −65 дБ), а относительная
+    //    всегда выводит самую густую полосу на полную и сохраняет рисунок.
+    let peak=0;
+    for (let b=0;b<bands;b++) for (let sp=0;sp<nsp;sp++) peak=Math.max(peak, amp[b][sp]);
+    if (peak<=0){ this.vocFrames++; this.vocLast={bands, voices:0, targets:[]}; return; }
+    const pairs=[];
+    for (let b=0;b<bands;b++) for (let sp=1;sp<=nsp;sp++){
+      const d=amp[b][sp-1];
+      if (d>0) pairs.push([b, sp, Math.pow(d/peak, this.VOC_GAMMA)]);
+    }
+    // 3. ОТБОР. Вокодер — это несколько выразительных полос, а не гребёнка из
+    //    всего, что горит. Оставляем самые громкие, остальные глушим.
+    pairs.sort((x,y)=> y[2]-x[2]);
+    const keep=pairs.slice(0, this.VOC_MAX_VOICES);
+    // 4. НОРМИРОВКА ПО МОЩНОСТИ. Некогерентные тона складываются как корень из
+    //    суммы квадратов, а деление на линейную сумму занижало громкость в √N
+    //    раз: замер дал RMS 0.0147 против 0.0626 у гармоник при том же миксе.
+    //    Общий уровень кадра идёт от густоты самой густой полосы — густой мир
+    //    громче, пустой тише, но не немой.
+    let p=0; for (const [,,a] of keep) p+=a*a;
+    const norm = this.VOC_LEVEL * Math.sqrt(Math.min(peak, 1)) / Math.sqrt(Math.max(p, 1e-6));
+    const want=new Map();
+    for (const [b,sp,a] of keep){
+      const step=this.vocFreq(b,bands);
+      // вес считается по ЧАСТОТЕ голоса, а не по номеру ступени: на номере
+      // sqrt(80/3) давал множитель 5 и разносил шину (замер: gain до 1.28)
+      const hz=this.vocVoiceFreq(step, sp);
+      want.set(b+':'+sp, {step, sp, hz, g:a*norm*Math.sqrt(this.VOC_LO/hz)});
+    }
+    for (const [key, node] of this.vocNodes)
+      if (!want.has(key)) node.g.gain.setTargetAtTime(0, t, 0.05);
+    for (const [key, v] of want){
+      const node=this.vocNode(key, v.hz, v.sp);
+      node.p.pan.value=Math.max(-1,Math.min(1,(v.sp-(nsp+1)/2)/Math.max(nsp,1)*1.6));
+      node.g.gain.setTargetAtTime(v.g, t, 0.04);
     }
     this.vocFrames++;
-    this.vocLast={bands, amp};
+    // что именно назначено в этом кадре: по нему проверяется поведение и там,
+    // где звуковой контекст усыплён и gain.value ещё не дошёл до цели
+    this.vocLast={bands, voices:keep.length,
+                  targets:[...want.entries()].map(([k,v])=>({key:k, sp:v.sp, hz:v.hz, g:v.g}))};
   },
   setVocoder(on){
     this.vocOn=!!on;
