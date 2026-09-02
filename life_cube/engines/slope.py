@@ -62,8 +62,8 @@ COLORS = ("#9fb3a8", "#7bd94a", "#2e8b3d", "#4a9ef2", "#f24a9e")
 #                 light absorb subst trunk branch erode metab repro  life mass hunt tro spd sns armor
 GENOMES = np.array([
     [0.55, 0.10, 0.0,  0,  0.40, 0.30, 0.006,  3.0,    0, 0.5, 0.0, 0, 0, 0, 0.90],  # мох
-    [0.85, 0.22, 1.0,  0,  0.90, 0.00, 0.020,  0.8,  300, 1.0, 0.0, 0, 0, 0, 0.35],  # трава
-    [0.95, 0.50, 1.0,  5,  1.20, 0.00, 0.050,  1.6, 1200, 5.0, 0.0, 0, 0, 0, 0.95],  # дерево
+    [0.85, 0.22, 1.0,  0,  0.90, 0.00, 0.200,  0.8,  300, 1.0, 0.0, 0, 0, 0, 0.35],  # трава
+    [0.95, 0.75, 1.0,  5,  1.20, 0.00, 0.050,  1.6, 1200, 5.0, 0.0, 0, 0, 0, 0.95],  # дерево
     [0.00, 0.00, 0.0,  0,  0.00, 0.00, 0.015,  6.0,  400, 4.0, 0.15, 1, 1, 5, 0.45],  # травоядное
     [0.00, 0.00, 0.0,  0,  0.00, 0.00, 0.120,  8.0,  900, 6.0, 0.10, 2, 2, 7, 0.05],  # хищник
 ], dtype=np.float32)
@@ -123,7 +123,8 @@ class SlopeConfig:
     water_gain: float = 0.5         # прибавка к ресурсу от воды
     crown_light: float = 0.35   # ниже этого света крона не разрастается
     trunk_spacing: int = 3      # ближе этого стволы друг к другу не встают
-    log_stone: bool = True      # погибшее дерево оставляет колоду (камень)
+    log_stone: bool = True      # погибшее дерево роняет ствол колодой
+    log_max: int = 8            # длиннее этого колода не ложится
     seed_range: int = 6         # как далеко дерево роняет семя
     seed_fall: float = 0.004    # шанс всхода на подходящем месте
     seed_maturity: float = 1.2  # во сколько цен клетки кошелёк даёт семя
@@ -242,6 +243,7 @@ class SlopeRules(Rules):
             "stone_h": xp.asarray(stone_h),
             "soil_h": xp.asarray(soil_h),
             "water_h": xp.zeros((n, n), dtype=xp.int32),
+            "log_h": xp.zeros((n, n), dtype=xp.int32),
             "wet": xp.zeros((n, n), dtype=xp.float32),
             "genomes": xp.asarray(cfg.genomes),
             "rng": xp.random.default_rng(cfg.seed_mut),
@@ -349,8 +351,13 @@ class SlopeRules(Rules):
         G = state["genomes"]
         species, energy, age = state["species"], state["energy"], state["age"]
         stone_h, soil_h, wet = state["stone_h"], state["soil_h"], state["wet"]
+        log_h = state.get("log_h")
+        if log_h is None:
+            log_h = xp.zeros((n, n), dtype=stone_h.dtype)
         zz = xp.arange(n)[None, None, :]
-        surface = stone_h + soil_h
+        # Колода лежит ПОВЕРХ почвы: она часть поверхности, но не подложка —
+        # расти на ней нельзя никому, кроме мха, который её и перерабатывает.
+        surface = stone_h + soil_h + log_h
         alive = species > 0
         idx = xp.clip(species.astype(xp.int32) - 1, 0, N_SPECIES - 1)
 
@@ -380,12 +387,18 @@ class SlopeRules(Rules):
         # Это единственный источник почвы в мире. Мох работает только там, где
         # он стоит на ГОЛОМ камне (soil_h == 0) и только на поверхности.
         on_surface = plants & (zz == surface[:, :, None])
-        bare = (soil_h == 0)[:, :, None]
+        # «голое» для мха — и камень, и колода: древесину в этом мире
+        # перерабатывает он же, и она становится почвой
+        bare = ((soil_h == 0) | (log_h > 0))[:, :, None]
         er = gene("erode") * on_surface * bare
         p_er = cfg.erode_rate * er * xp.minimum(wet[:, :, None], 1.0)
-        eroding = (rng.random(species.shape) < p_er).any(axis=2) & (stone_h > cfg.floor)
-        stone_h = stone_h - eroding.astype(stone_h.dtype)
-        soil_h = soil_h + eroding.astype(soil_h.dtype)
+        eroding = (rng.random(species.shape) < p_er).any(axis=2)
+        eat_log = eroding & (log_h > 0)                  # колода сгнила в почву
+        log_h = log_h - eat_log.astype(log_h.dtype)
+        soil_h = soil_h + eat_log.astype(soil_h.dtype)
+        eat_rock = eroding & ~eat_log & (stone_h > cfg.floor)
+        stone_h = stone_h - eat_rock.astype(stone_h.dtype)
+        soil_h = soil_h + eat_rock.astype(soil_h.dtype)
 
         # --- 3. почва скатывается вниз по склону ------------------------------
         surface = stone_h + soil_h
@@ -402,7 +415,7 @@ class SlopeRules(Rules):
         for k, (dx, dy) in enumerate(self.DIRS2):
             soil_h = soil_h + self._shift2(
                 xp.where(go & (bdir == k), 1, 0).astype(soil_h.dtype), -dx, -dy, xp)
-        new_surface = stone_h + soil_h
+        new_surface = stone_h + soil_h + log_h
 
         # --- 4. подложка поехала: поднимаем/роняем то, что на ней стояло ------
         rise = new_surface - surface
@@ -457,8 +470,11 @@ class SlopeRules(Rules):
             idx = xp.clip(species.astype(xp.int32) - 1, 0, N_SPECIES - 1)
             plants = alive & ~is_anim
             flat = plants & ~gtrunk[idx]
-        # всё, что после падения всё ещё висит, — гибнет
-        wrong = flat & ((zz != surf3) | (~gsoil[idx] & (soil_h > 0)[:, :, None]))
+        # всё, что после падения всё ещё висит, — гибнет.
+        # Колода на столбце делает его «голым»: почва под ней накрыта, и для
+        # мха это законная подложка — он её и перерабатывает.
+        bare_col = ((soil_h == 0) | (log_h > 0))[:, :, None]
+        wrong = flat & ((zz != surf3) | (~gsoil[idx] & ~bare_col))
         species = xp.where(wrong, xp.uint8(0), species)
         energy = xp.where(wrong, 0.0, energy)
         alive = species > 0
@@ -495,6 +511,9 @@ class SlopeRules(Rules):
             idx = xp.clip(species.astype(xp.int32) - 1, 0, N_SPECIES - 1)
         state["tree_id"] = tree_id
         had_root = (trunky & (zz == surface[:, :, None])).any(axis=2)
+        # высота дерева пригодится, когда оно упадёт: колода ложится длиной со
+        # ствол, а после гибели считать уже нечего
+        had_height = xp.where(trunky, zz - surface[:, :, None] + 1, 0).max(axis=2)
 
         # похороненное подложкой гибнет
         buried = alive & (zz < surface[:, :, None])
@@ -517,8 +536,8 @@ class SlopeRules(Rules):
         # а доедает запас и вымирает сама — мягче, чем убивать её на месте
         gsoil5 = xp.asarray(np.asarray(cfg.genomes)[:, IDX["substrate"]] >= 0.5)
         gtrunk5 = xp.asarray(np.asarray(cfg.genomes)[:, IDX["trunk"]] > 0)
-        wrong_sub = (plants & ~gtrunk5[idx]
-                     & (gsoil5[idx] != (soil_h > 0)[:, :, None]))
+        on_ground = ((soil_h > 0) & (log_h == 0))[:, :, None]
+        wrong_sub = plants & ~gtrunk5[idx] & (gsoil5[idx] != on_ground)
         R = xp.where(wrong_sub, 0.0, R)
 
         # --- 6. экономика: копим, стареем, голодаем ---------------------------
@@ -568,19 +587,17 @@ class SlopeRules(Rules):
         # обратно в почву. Круг замыкается: лес → колода → камень → мох → почва.
         if cfg.log_stone:
             now_root = (plants & gtrunk[idx] & (zz == surface[:, :, None])).any(axis=2)
-            logs = had_root & ~now_root          # где корень был, а теперь нет
-            if bool(logs.any()):
-                add = logs.astype(stone_h.dtype)
-                stone_h = stone_h + add * (soil_h + 1)   # колода накрывает почву
-                soil_h = xp.where(logs, 0, soil_h)
-                surface = stone_h + soil_h
+            fallen_root = had_root & ~now_root       # где корень был, а теперь нет
+            if bool(fallen_root.any()):
+                log_h = self._fell_trunks(state, cfg, xp, rng, fallen_root,
+                                          log_h, had_height)
 
         # --- 7. рождение растений --------------------------------------------
         species, energy, age = self._grow(
             state, cfg, xp, correlate, rng, species, energy, age,
             plants, surface, soil_h, L, zz)
 
-        state.update(species=species, energy=energy, age=age,
+        state.update(species=species, energy=energy, age=age, log_h=log_h,
                      stone_h=stone_h, soil_h=soil_h, wet=wet, gen=gen)
         self._sync_volumes(state, cfg, xp)
 
@@ -618,7 +635,10 @@ class SlopeRules(Rules):
         n = cfg.n
         surf3 = surface[:, :, None]
         empty = ~(species > 0) & (zz >= surf3)
-        on_soil = (soil_h > 0)[:, :, None]
+        log2d = state.get("log_h")
+        under_log = (log2d > 0)[:, :, None] if log2d is not None else False
+        # на колоде подложки нет: почва под ней накрыта, а сама она — древесина
+        on_soil = (soil_h > 0)[:, :, None] & ~under_log
         K1 = state.get("k1")
         if K1 is None:
             K1 = xp.ones((3, 3, 3), dtype=xp.float32); K1[1, 1, 1] = 0
@@ -794,6 +814,32 @@ class SlopeRules(Rules):
             age = xp.where(pick, xp.int32(0), age)
             out = out & ~pick
         return species, energy, age
+
+    def _fell_trunks(self, state, cfg, xp, rng, fallen, log_h, had_height):
+        """Погибшее дерево ПАДАЕТ: ствол валится в случайную сторону и ложится
+        на землю линией клеток длиной со своё дерево.
+
+        Раньше колода вставала столбиком на месте корня — в кадре это были
+        чёрные каменные тумбы непонятного происхождения, тем более что высота
+        столбика равнялась глубине погребённой почвы. Лежачая колода и выглядит
+        как поваленное дерево, и закрывает ровно ту полосу земли, которую
+        накрыл бы настоящий ствол.
+        """
+        from ..backend import to_cpu
+        n = cfg.n
+        fall = to_cpu(fallen)
+        hh = to_cpu(had_height)
+        add = np.zeros((n, n), np.int32)
+        rng_cpu = np.random.default_rng(int(state.get("gen", 0)) ^ 0x10ff5eed)
+        for x, y in np.argwhere(fall):
+            length = int(min(max(hh[x, y], 1), cfg.log_max))
+            dx, dy = self.DIRS2[rng_cpu.integers(len(self.DIRS2))]
+            for k in range(length):
+                px, py = int(x) + dx * k, int(y) + dy * k
+                if not (0 <= px < n and 0 <= py < n):
+                    break
+                add[px, py] = 1                    # колода лежит В ОДНУ клетку
+        return xp.minimum(log_h + xp.asarray(add), cfg.log_max)
 
     def _seed_fall(self, state, cfg, xp, correlate, rng, species, energy, age,
                    sid, g, cost_s, tree_id, purse, surface, soil_h, zz):

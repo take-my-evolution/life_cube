@@ -294,7 +294,7 @@ layout(location=2) in vec3 aCell;     // позиция клетки (uint16 -> 
 layout(location=3) in float aSpecies; // 0..4
 layout(location=4) in float aLabel;   // id организма
 layout(location=5) in float aSize;    // размер организма
-layout(location=6) in float aKind;    // 0 живая, 1 камень, 2 почва, 3 вода
+layout(location=6) in float aKind;    // 0 живая, 1 камень, 2 почва, 3 вода, 4 колода
 layout(location=7) in float aHeight;  // высота столба в клетках (1 у живых)
 uniform mat4 uVP;
 uniform float uMask[256];             // маска видов 1..256
@@ -316,9 +316,10 @@ void main(){
     col = uColorMode < 0.5 ? uCol[int(aSpecies) & 255] : hashCol(aLabel);
   } else if (aKind < 1.5) { col = vec3(0.30,0.31,0.35); if (uShowStone < 0.5) visible = 0.0; }
   else if (aKind < 2.5) { col = vec3(0.35,0.25,0.16); if (uShowSoil < 0.5) visible = 0.0; }
-  else { col = vec3(0.16,0.40,0.72); if (uShowWater < 0.5) visible = 0.0; }
+  else if (aKind < 3.5) { col = vec3(0.16,0.40,0.72); if (uShowWater < 0.5) visible = 0.0; }
+  else { col = vec3(0.42,0.29,0.13); if (uShowSoil < 0.5) visible = 0.0; }   // колода
   // вода рисуется вторым, полупрозрачным проходом
-  if ((uWaterPass > 0.5) != (aKind > 2.5)) visible = 0.0;
+  if ((uWaterPass > 0.5) != (aKind > 2.5 && aKind < 3.5)) visible = 0.0;
   float sc = ghost > 0.5 ? 0.28 : 1.0;
   vec3 p = aCell + vec3(0.5, 0.5, 0.0) + vec3((aPos.xy - 0.5) * sc, aPos.z * aHeight * sc);
   gl_Position = visible > 0.5 ? uVP * vec4(p, 1.0) : vec4(2.0, 2.0, 2.0, 1.0);
@@ -373,7 +374,7 @@ function rebuildInstances(){
   const cols = n*n;
   // подложка — один инстанс на столбец (камень), плюс почва и вода столбами.
   // Раньше камень рисовался одной клеткой на столбец — отсюда «тонкая корка»
-  const terrain = heightmaps ? cols*3 : (S.relief ? cols : 0);
+  const terrain = heightmaps ? cols*4 : (S.relief ? cols : 0);
   const total = k + m + terrain;
   const cell = new Uint16Array(total*3), sp = new Uint8Array(total), lab = new Float32Array(total),
         size = new Float32Array(total), kind = new Uint8Array(total), hgt = new Float32Array(total);
@@ -387,12 +388,14 @@ function rebuildInstances(){
   let o = k;
   if (m){ cell.set(S.soil, o*3); for (let i=0;i<m;i++) kind[o+i]=2; o += m; }
   if (heightmaps){
-    const st=S.stoneH, so=S.soilH, wa=S.waterH;
+    const st=S.stoneH, so=S.soilH, wa=S.waterH, lo=S.logH;
     for (let x=0;x<n;x++) for (let y=0;y<n;y++){
-      const i=x*n+y, sh=st[i], sd=so?so[i]:0, wd=wa?wa[i]:0;
+      const i=x*n+y, sh=st[i], sd=so?so[i]:0, wd=wa?wa[i]:0, ld=lo?lo[i]:0;
       if (sh>0){ cell[o*3]=x; cell[o*3+1]=y; cell[o*3+2]=0; kind[o]=1; hgt[o]=sh; o++; }
       if (sd>0){ cell[o*3]=x; cell[o*3+1]=y; cell[o*3+2]=sh; kind[o]=2; hgt[o]=sd; o++; }
-      if (wd>0){ cell[o*3]=x; cell[o*3+1]=y; cell[o*3+2]=sh+sd; kind[o]=3; hgt[o]=wd; o++; }
+      // колода лежит поверх почвы: её видно как поваленный ствол
+      if (ld>0){ cell[o*3]=x; cell[o*3+1]=y; cell[o*3+2]=sh+sd; kind[o]=4; hgt[o]=ld; o++; }
+      if (wd>0){ cell[o*3]=x; cell[o*3+1]=y; cell[o*3+2]=sh+sd+ld; kind[o]=3; hgt[o]=wd; o++; }
     }
   } else if (S.relief){
     for (let x=0;x<n;x++) for (let y=0;y<n;y++){
@@ -548,7 +551,7 @@ function applyFrame(buf){
   if (hdr.labels){ S.labels=new Uint32Array(buf.slice(off, off+k*4)); off+=k*4; }
   S.soil=new Uint16Array(buf.slice(off, off+m*6)); off+=m*6;
   if (hdr.maps){ const N=hdr.n;
-    for (const key of ['stone_h','soil_h','water_h']) if (hdr.maps[key]){
+    for (const key of ['stone_h','soil_h','water_h','log_h']) if (hdr.maps[key]){
       hdr[key]=new Uint16Array(buf.slice(off, off+N*N*2)); off+=N*N*2; } }
   S.gen=hdr.gen; S.k=k; S.pops=hdr.pops; S.biomass=hdr.biomass||null; S.organisms=hdr.organisms||null; S.comps=hdr.components; S.hist=hdr.hist_tail;
   S.paused=hdr.paused; S.rate=hdr.rate; S.measured=hdr.measured_rate;
@@ -558,6 +561,7 @@ function applyFrame(buf){
     if (hdr.stone_h) S.stoneH=hdr.stone_h;
     if (hdr.soil_h) S.soilH=hdr.soil_h;
     if (hdr.water_h) S.waterH=hdr.water_h;
+    if (hdr.log_h) S.logH=hdr.log_h;
     S.hasWater = !!(S.waterH && S.waterH.some(v=>v>0));
   }
   S.hasLabels = !!hdr.labels;

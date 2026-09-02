@@ -42,6 +42,13 @@ def arrays(st):
             np.asarray(st["soil_h"]))
 
 
+def surface_of(st):
+    """Поверхность = камень + почва + КОЛОДЫ: упавший ствол тоже часть рельефа."""
+    out = np.asarray(st["stone_h"]) + np.asarray(st["soil_h"])
+    log = st.get("log_h")
+    return out + np.asarray(log) if log is not None else out
+
+
 def test_registered():
     from life_cube.engines import list_engines
     assert "slope" in {e["name"] for e in list_engines()}
@@ -58,7 +65,7 @@ def test_moss_only_on_bare_stone_surface(run):
     sp, stone, soil = arrays(st)
     cells = np.argwhere(sp == MOSS)
     assert len(cells) > 20
-    surf = stone + soil
+    surf = surface_of(st)
     off = sum(1 for x, y, z in cells if soil[x, y] != 0 or z != surf[x, y])
     # исключений быть не должно: съехавшая подложка убивает стелющееся растение
     assert off == 0, f"{off} из {len(cells)}"
@@ -67,7 +74,7 @@ def test_moss_only_on_bare_stone_surface(run):
 def test_plants_only_on_soil(run):
     _, _, st, _ = run
     sp, stone, soil = arrays(st)
-    surf = stone + soil
+    surf = surface_of(st)
     for s in (GRASS, TREE):
         cells = np.argwhere(sp == s)
         assert len(cells) > 20
@@ -83,7 +90,7 @@ def test_plants_only_on_soil(run):
 def test_trees_build_trunks(run):
     _, cfg, st, _ = run
     sp, stone, soil = arrays(st)
-    surf = stone + soil
+    surf = surface_of(st)
     trunk = int(cfg.genomes[TREE - 1][IDX["trunk"]])
     heights = []
     for x, y in np.argwhere((sp == TREE).any(axis=2)):
@@ -105,7 +112,7 @@ def test_crown_shades_the_ground(run):
     _, cfg, st, _ = run
     sp, stone, soil = arrays(st)
     n = sp.shape[0]
-    surf = stone + soil
+    surf = surface_of(st)
     G = np.asarray(cfg.genomes)
     idx = np.clip(sp.astype(int) - 1, 0, len(G) - 1)
     plants = (sp > 0) & (G[idx, IDX["speed"]] == 0)
@@ -123,13 +130,36 @@ def test_crown_shades_the_ground(run):
     under = ground_light[under_crown & ground]
     open_ = ground_light[(~under_crown) & ground]
     assert under.size and open_.size
-    assert under.mean() < 0.75 * open_.mean(), (under.mean(), open_.mean())
+    assert under.mean() < 0.5 * open_.mean(), (under.mean(), open_.mean())
+
+
+
+def test_shade_thins_the_grass_under_the_trees():
+    """Под кроной должны быть ПРОГАЛИНЫ, а не просто тёмный свет.
+
+    Одного затенения мало: трава, которой хватает крох, под деревом просто
+    растёт медленнее — и всё равно смыкается, да ещё и оказывается защищена от
+    травоядных (в столбец с деревом им хода нет). Прогалина появляется, только
+    когда трава ТРАТИТ больше, чем добирает в тени. Мир берём зрелый: на
+    двухсотом поколении лес ещё молод, и разница видна сама собой.
+    """
+    R, cfg, st, _ = world(n=40, gens=400, seed=11)
+    sp, stone, soil = arrays(st)
+    crown = (sp == TREE).any(axis=2)
+    assert crown.sum() > 20, "лес не вырос — тень мерить не на чем"
+    grass = (sp == GRASS).any(axis=2)
+    ground = soil > 0
+    under, open_ = grass[crown & ground], grass[(~crown) & ground]
+    assert under.size > 10 and open_.size > 10
+    # замер: до починки трава под кроной была ГУЩЕ открытой (отношение 1.1–1.5
+    # — крона защищала её от травоядных), после стало 0.68–0.79
+    assert under.mean() < 0.9 * open_.mean(), (under.mean(), open_.mean())
 
 
 def test_animals_stay_on_the_ground(run):
     _, _, st, _ = run
     sp, stone, soil = arrays(st)
-    surf = stone + soil
+    surf = surface_of(st)
     for s in (HERB, PRED):
         cells = np.argwhere(sp == s)
         assert len(cells) > 5
@@ -322,7 +352,7 @@ def test_tree_is_one_organism_with_a_shared_purse(run):
     ids = np.unique(tid[tid > 0])
     assert 0 < len(ids) < len(cells), "каждая клетка оказалась отдельным деревом"
     # у каждого организма ровно один корень на подложке, и энергия — там
-    surf = stone + soil
+    surf = surface_of(st)
     en = np.asarray(st["energy"])
     for i in ids[:8]:
         mine = np.argwhere(tid == i)
@@ -375,7 +405,7 @@ def test_trunks_keep_their_distance():
     sp, stone, soil = arrays(st)
     tid = np.asarray(st["tree_id"])
     n = sp.shape[0]
-    surf = stone + soil
+    surf = surface_of(st)
     roots = [(x, y) for x, y, z in np.argwhere(sp == TREE)
              if z == surf[x, y] and tid[x, y, z] == x * n + y + 1]
     assert len(roots) > 3, f"стволов всего {len(roots)}"
@@ -516,57 +546,109 @@ def test_herbivore_does_not_eat_moss():
     assert after >= before, f"мха было {before}, стало {after} — его съели"
 
 
-def test_dead_tree_leaves_a_log_of_stone():
-    """Погибшее дерево кладёт на свой столбец колоду: почва накрыта, растениям
-    там места нет, и переработать её может только мох."""
+def test_a_dying_tree_falls_over(  ):
+    """Ствол ПАДАЕТ: валится в случайную сторону и ложится линией по земле
+    длиной со своё дерево. Прежняя колода вставала тумбой на месте корня, да
+    ещё высотой в погребённую под ней почву — в кадре это были чёрные каменные
+    столбики непонятного происхождения."""
     R = get_rules("slope")
-    cfg = R.make_config(n=16, seed_world=3, seed_animals=0.0, seed_tree=0.0,
+    cfg = R.make_config(n=20, seed_world=3, seed_animals=0.0, seed_tree=0.0,
                         seed_density=0.0, mutate_rate=0.0, soil_slide=0.0)
     xp, corr, _ = get_backend(False)
     st, _ = R.init_state(cfg, xp)
     stone0, soil0 = np.asarray(st["stone_h"]).copy(), np.asarray(st["soil_h"]).copy()
     x, y = map(int, np.argwhere(soil0 > 0)[0])
-    assert soil0[x, y] > 0
     sp = np.zeros_like(np.asarray(st["species"]))
     en = np.zeros_like(np.asarray(st["energy"]))
     z0 = int(stone0[x, y] + soil0[x, y])
     trunk = int(cfg.genomes[TREE - 1][IDX["trunk"]])
-    for k in range(trunk + 2):
+    for k in range(trunk + 3):
         sp[x, y, z0 + k] = TREE
         en[x, y, z0 + k] = 30.0
     st["species"], st["energy"] = xp.asarray(sp), xp.asarray(en)
     R.step(st, cfg, xp, corr, 1)
+    height = int((np.asarray(st["species"])[x, y] == TREE).sum())
     en = np.asarray(st["energy"]).copy()
-    en[x, y, z0] = -1000.0                     # дерево гибнет от голода
+    en[x, y, z0] = -1000.0                       # дерево гибнет от голода
     st["energy"] = xp.asarray(en)
     R.step(st, cfg, xp, corr, 2)
+
     assert int((np.asarray(st["species"]) == TREE).sum()) == 0
-    assert int(np.asarray(st["soil_h"])[x, y]) == 0, "почва осталась открытой"
-    assert int(np.asarray(st["stone_h"])[x, y]) > int(stone0[x, y]), "колоды нет"
+    log = np.asarray(st["log_h"])
+    cells = np.argwhere(log > 0)
+    assert len(cells) > 1, "колода осталась в одной клетке — ствол не упал"
+    assert int(log.max()) == 1, "колода встала столбиком, а должна лежать"
+    assert len(cells) <= height, (len(cells), height)
+    # ложится ПРЯМОЙ линией из места, где стояло дерево
+    assert (len(set(map(int, cells[:, 0]))) == 1) or (len(set(map(int, cells[:, 1]))) == 1)
+    assert any(int(a) == x and int(b) == y for a, b in cells)
+    # камень при этом никуда не вырос и почву не съел
+    assert np.array_equal(np.asarray(st["stone_h"]), stone0)
+    assert int(np.asarray(st["soil_h"])[x, y]) == int(soil0[x, y])
 
 
-def test_moss_turns_a_log_back_into_soil():
-    """Круг замыкается: лес → колода → камень → мох → почва."""
+def test_nothing_grows_on_a_fallen_log():
+    """Пока ствол лежит, места растениям там нет: колода — не подложка."""
     R = get_rules("slope")
     cfg = R.make_config(n=16, seed_world=3, seed_animals=0.0, seed_tree=0.0,
-                        seed_density=0.0, mutate_rate=0.0, soil_slide=0.0)
+                        seed_density=0.0, mutate_rate=0.0, soil_slide=0.0,
+                        erode_rate=0.0)
     xp, corr, _ = get_backend(False)
     st, _ = R.init_state(cfg, xp)
-    stone = np.asarray(st["stone_h"])
-    x, y = map(int, np.argwhere(np.asarray(st["soil_h"]) == 0)[0])
+    soil = np.asarray(st["soil_h"])
+    log = np.zeros_like(np.asarray(st["log_h"]))
+    spots = np.argwhere(soil > 0)[:8]
+    for x, y in spots:
+        log[x, y] = 1                            # колода поперёк луговины
+    st["log_h"] = xp.asarray(log)
     sp = np.zeros_like(np.asarray(st["species"]))
     en = np.zeros_like(np.asarray(st["energy"]))
-    z = int(stone[x, y])
-    sp[x, y, z] = MOSS
+    surf = np.asarray(st["stone_h"]) + soil + log
+    for x, y in np.argwhere(soil > 0)[8:24]:     # трава кругом, но не на колоде
+        sp[x, y, int(surf[x, y])] = GRASS
+        en[x, y, int(surf[x, y])] = 20.0
+    st["species"], st["energy"] = xp.asarray(sp), xp.asarray(en)
+    for g in range(1, 200):
+        R.step(st, cfg, xp, corr, g)
+    cur = np.asarray(st["species"])
+    log = np.asarray(st["log_h"])
+    on_log = [(x, y) for x, y in np.argwhere(log > 0) if (cur[x, y] == GRASS).any()]
+    assert not on_log, f"на колоде выросла трава: {on_log[:4]}"
+
+
+def test_moss_rots_a_log_into_soil():
+    """Круг замыкается: лес → колода → мох → почва. Древесину в этом мире
+    перерабатывает мох, он же живёт на голом камне.
+
+    Дождь и скорость точения задраны: проверяем МЕХАНИЗМ, а не то, за сколько
+    поколений он сработает в сухом углу карты (мох точит только по мокрому).
+    """
+    R = get_rules("slope")
+    cfg = R.make_config(n=16, seed_world=3, seed_animals=0.0, seed_tree=0.0,
+                        seed_density=0.0, mutate_rate=0.0, soil_slide=0.0,
+                        erode_rate=0.2, rain_rate=0.5, rain_amount=2.0)
+    xp, corr, _ = get_backend(False)
+    st, _ = R.init_state(cfg, xp)
+    soil0 = np.asarray(st["soil_h"])
+    x, y = map(int, np.argwhere(soil0 > 0)[0])
+    log = np.zeros_like(np.asarray(st["log_h"]))
+    log[x, y] = 1
+    st["log_h"] = xp.asarray(log)
+    sp = np.zeros_like(np.asarray(st["species"]))
+    en = np.zeros_like(np.asarray(st["energy"]))
+    z = int(np.asarray(st["stone_h"])[x, y] + soil0[x, y] + 1)
+    sp[x, y, z] = MOSS                           # мох поселился на колоде
     en[x, y, z] = 10.0
     st["species"], st["energy"] = xp.asarray(sp), xp.asarray(en)
     st["wet"] = xp.ones((cfg.n, cfg.n), dtype=xp.float32)
-    for g in range(1, 3000):
+    soil_was = int(soil0[x, y])
+    for g in range(1, 400):
         R.step(st, cfg, xp, corr, g)
-        if int(np.asarray(st["soil_h"])[x, y]) > 0:
+        if int(np.asarray(st["log_h"])[x, y]) == 0:
             break
     else:
-        raise AssertionError("мох не сделал почву за 3000 поколений")
+        raise AssertionError("мох не сгноил колоду за 3000 поколений")
+    assert int(np.asarray(st["soil_h"])[x, y]) > soil_was, "колода исчезла без почвы"
 
 
 def test_the_hill_is_not_buried_in_the_plain():
