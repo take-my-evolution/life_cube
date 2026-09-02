@@ -879,7 +879,11 @@ $('engineSel').onchange = e=>{ $('status').textContent='переключаю д�
 $('btnRestart').onclick = ()=>send({cmd:'restart'});
 $('btnRandom').onclick = ()=>{ // случайные гены без перезапуска: применяем как правку
   if (!CFG.data) return; const f=CFG.data.fields;
-  CFG.edited = CFG.edited.map(row=>row.map((v,gi)=>{ const [lo,hi]=CFG.data.ranges[f[gi]]||[0,1]; if (f[gi]==='trophic'||f[gi]==='speed') return v; return +(lo+Math.random()*(hi-lo)).toFixed(3); }));
+  // список неприкосновенных генов держит ДВИЖОК: клиент не знает, что для
+  // «склона» подложка и ствол — тоже роль, а не сила (мох со стволом 9 — это
+  // сломанный мир, а не другой мох)
+  const FIX = new Set(CFG.data.fixed_genes || ['trophic','speed']);
+  CFG.edited = CFG.edited.map(row=>row.map((v,gi)=>{ const [lo,hi]=CFG.data.ranges[f[gi]]||[0,1]; if (FIX.has(f[gi])) return v; return +(lo+Math.random()*(hi-lo)).toFixed(3); }));
   geneSliders(); send({cmd:'genomes', value:CFG.edited, ids:CFG.ids}); };
 $('btnRandomRestart').onclick = ()=>{ $('status').textContent='случайные параметры + новый мир…'; send({cmd:'randomize', seed: Math.floor(Math.random()*1e9)}); };
 $('btnApplyGenes').onclick=()=>{ send({cmd:'genomes', value:CFG.edited, ids:CFG.ids});
