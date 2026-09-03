@@ -45,6 +45,12 @@ class Snapshot:
     stone_h: np.ndarray = None      # (n, n) uint16
     soil_h: np.ndarray = None       # (n, n) uint16
     water_h: np.ndarray = None      # (n, n) uint16
+    # события с прошлого кадра: (k,5) uint16 — тип (1 рождение, 2 гибель,
+    # 3 смена вида), x, y, z, вид; и номер организма на каждое (0 — неизвестен)
+    events: np.ndarray = None
+    event_orgs: np.ndarray = None
+    event_gens: int = 0             # сколько поколений уложилось в кадр
+    mobile: list = None             # виды, которые ходят (шаг ≠ рождение)
 
 
 # ---------------------------------------------------------------------------

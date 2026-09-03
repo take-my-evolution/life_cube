@@ -18,6 +18,7 @@ ENGINES = {
     "lichen": "life_cube.engines.lichen",
     "terra": "life_cube.engines.terra",
     "slope": "life_cube.engines.slope",
+    "iron": "life_cube.engines.iron",
 }
 
 _cache = {}
@@ -127,6 +128,11 @@ class Rules:
         По умолчанию все клетки одинаковы (единица); движки, у которых есть
         ген массы, переопределяют."""
         return [1.0] * int(self.n_species(cfg))
+
+    def mobile_species(self, cfg):
+        """Номера видов, которые ходят (1-based). Зрителю и звуку это нужно,
+        чтобы отличить шаг зверя от рождения и гибели клетки."""
+        return []
 
     def species_organisms(self, cfg, state=None):
         """Сколько ОРГАНИЗМОВ каждого вида. По умолчанию — None: у движка, где

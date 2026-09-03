@@ -149,6 +149,17 @@
   <div class="row muted">длина зерна <b id="grainMsLbl">70</b> мс
     <input id="grainMs" type="range" style="width:70px" min="15" max="220" step="5" value="70"></div>
   <div class="row muted">микс гранул <input id="mixG" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.7"></div>
+  <div class="row"><label class="sp"><input type="checkbox" id="orgOn"> Организмы (сэмпл = организм, зерно = событие)</label></div>
+  <div class="row muted" id="orgHint">у каждого организма (дерево, зверь, плитка луга 8×8) своя волновая таблица из генома
+    и его состояния: крупный — ниже, старый — темнее. Зёрна запускают <b>события</b> мира — рождение (ярко), гибель
+    (темно, октавой ниже), шаг зверя (щелчок); плюс тихое «дыхание» каждого организма. Пул из 128 голосов в
+    AudioWorklet — та же структура, что ляжет в ПЛИС</div>
+  <div class="row muted">дыхание <b id="orgBreathLbl">0.6</b>
+    <input id="orgBreath" type="range" style="width:70px" min="0" max="2" step="0.05" value="0.6"></div>
+  <div class="row muted">события <b id="orgEvLbl">1.0</b>
+    <input id="orgEv" type="range" style="width:70px" min="0" max="2" step="0.05" value="1"></div>
+  <div class="row muted">микс организмов <input id="mixO" type="range" style="width:60px" min="0" max="1" step="0.05" value="0.8">
+    <span id="orgStat"></span></div>
   <div class="row"><label class="sp"><input type="checkbox" id="noteOn"> Ноты (ADSR-секвенсор)</label></div>
   <div class="row muted" id="noteHint">вместо дрона — отдельные ноты по сетке. Ритм вида — евклидов рисунок по его
     доле в населении; <b>атака</b> — от роста популяции (взрывной рост бьёт резко, угасающий вид вплывает мягко),
@@ -593,6 +604,12 @@ function applyFrame(buf){
     if (hdr.water_h) S.waterH=hdr.water_h;
     S.hasWater = !!(S.waterH && S.waterH.some(v=>v>0));
   }
+  // события с прошлого кадра: (тип, x, y, z, вид) × e и номер организма на каждое
+  const e = hdr.e || 0;
+  if (e){ S.events = new Uint16Array(buf.slice(off, off + e*10)); off += e*10;
+          S.eventOrgs = new Uint32Array(buf.slice(off, off + e*4)); off += e*4; }
+  else { S.events = null; S.eventOrgs = null; }
+  S.eventGens = hdr.e_gens || 0; S.mobile = hdr.mobile || [];
   S.hasLabels = !!hdr.labels;
   if (hdr.species_names) {
     const key = JSON.stringify([hdr.species_names, hdr.species_colors]);
@@ -614,6 +631,8 @@ function applyFrame(buf){
   rebuildInstances(); renderTable(); drawPops(); dirty=true;
   labTick();
   S.sound = hdr.sound; Audio.apply(hdr.sound); WF.push(hdr.sound);
+  try { Audio.Org.onFrame(); } catch (err) { console.error('org', err); }
+  if (Audio.Org.on) $('orgStat').textContent = `голосов ${Audio.Org.stats.active}, зёрен ${Audio.Org.stats.played}, таблиц ${Audio.Org.tables.size}`;
   S.connected=true;
 }
 function connect(){
@@ -981,6 +1000,283 @@ const Audio = {
   // гранулы: своя шина, кэш сэмплов по виду и счётчик сыгранных зёрен
   grainOn: false, grainBufs: new Map(), grainsPlayed: 0, busG: null, sendG: null,
   hannCurve: null, _grainTimer: null, _grainNext: 0, GRAIN_REF_HZ: 110,
+  // ------------------------------------------- «Организмы»: сэмпл = организм, зерно = событие
+  // Второе поколение гранул, спроектированное под ПЛИС (docs/iron-plan).
+  //
+  // Что было не так с первыми гранулами (v0.8): зерно бралось СЛУЧАЙНОЙ
+  // клеткой из всех живых, сэмпл был один на ВИД. В мире из 30 000 клеток и
+  // пяти видов это давало пять тембров, звучащих всегда и одновременно, —
+  // стационарный шум, который не следует ни за чем, что происходит в кубе.
+  //
+  // Здесь три замены:
+  //   1. единица тембра — ОРГАНИЗМ, не вид. Компактный организм (дерево,
+  //      зверь, куст) — по устойчивому id из разметки; сплошной ковёр (трава,
+  //      мох, волны) режется на плитки 8×8 столбцов, и плитка — организм.
+  //      Сотни разных голосов вместо пяти;
+  //   2. сэмпл организма — пара волновых таблиц (начало/конец «сэмпла») из
+  //      генома вида И состояния организма (размер, возраст, высота): с
+  //      возрастом темнеет, чем крупнее — тем ниже. Точка чтения (y клетки)
+  //      смешивает две таблицы — «глубина куба = время сэмпла» сохранено;
+  //   3. зерно запускает СОБЫТИЕ (рождение, гибель, смена вида, шаг зверя),
+  //      а не таймер. Плюс тихое «дыхание»: у каждого организма по длинному
+  //      зерну раз в несколько кадров — дрон из сотен голосов, не из пяти.
+  //
+  // Синтез — в AudioWorklet: фиксированный пул из 128 голосов, у голоса
+  // фазовый аккумулятор, окно Ханна, амплитуда, панорама, однополюсный
+  // фильтр и указатель на таблицы. Это ровно та структура, что ляжет в
+  // gateware: один умножитель обходит голоса по кругу.
+  Org: {
+    on: false, node: null, ready: false, ctx: null,
+    tables: new Map(),      // key -> {sp, bucket, seen}
+    tileBorn: new Map(),    // ключ плитки -> поколение первого появления
+    sent: 0, stats: {active: 0, played: 0, peak: 0},
+    lastFrameT: 0, frame: 0, TILE: 8, BIG: 400, MAX_EVENTS: 64, VOICES: 128,
+    breath: 0.6, evGain: 1.0,
+    WORKLET: `
+class OrgGrains extends AudioWorkletProcessor {
+  constructor(){ super();
+    this.tables = new Map(); this.voices = [];
+    for (let i=0;i<128;i++) this.voices.push({on:false});
+    this.hann = new Float32Array(1024);
+    for (let i=0;i<1024;i++) this.hann[i] = 0.5-0.5*Math.cos(2*Math.PI*i/1023);
+    this.played = 0; this.peak = 0; this.acc = 0;
+    this.port.onmessage = e => this.msg(e.data);
+  }
+  msg(m){
+    if (m.t === 'table') this.tables.set(m.key, {a: m.a, b: m.b});
+    else if (m.t === 'grain') this.start(m);
+    else if (m.t === 'forget') for (const k of m.keys) this.tables.delete(k);
+    else if (m.t === 'reset'){ this.tables.clear(); for (const v of this.voices) v.on = false; }
+  }
+  start(m){
+    const T = this.tables.get(m.key); if (!T) return;
+    let v = null, worst = null, wa = 1e9;
+    for (const c of this.voices){ if (!c.on){ v = c; break; }
+      const rem = (c.len - c.pos) * c.amp; if (rem < wa){ wa = rem; worst = c; } }
+    if (!v) v = worst;
+    v.on = true; v.T = T; v.phase = ((m.ph||0) % 1) * 1024;
+    v.inc = Math.min(512, m.hz * 1024 / sampleRate);
+    v.pos = 0; v.len = Math.max(64, (m.dur * sampleRate) | 0);
+    v.amp = m.amp; const th = (m.pan * 0.5 + 0.5) * Math.PI / 2;
+    v.panL = Math.cos(th); v.panR = Math.sin(th);
+    v.mix = Math.min(1, Math.max(0, m.pos)); v.lp = 0;
+    // однополюсный фильтр: яркость 0..1 -> коэффициент; вдобавок режет всё,
+    // что при высокой скорости чтения улетело бы за Найквист
+    const bright = Math.min(1, Math.max(0.05, m.bright));
+    v.lpc = Math.min(0.95, bright * 0.9 * Math.min(1, 4 / Math.max(1, m.hz / 110)));
+    v.delay = Math.max(0, (m.delay || 0) * sampleRate) | 0;
+    this.played++;
+  }
+  process(inputs, outputs){
+    const L = outputs[0][0], R = outputs[0][1]; if (!L || !R) return true;
+    const N = L.length; L.fill(0); R.fill(0);
+    let active = 0;
+    for (const v of this.voices){
+      if (!v.on) continue; active++;
+      const A = v.T.a, B = v.T.b, hann = this.hann, k = 1024 / v.len;
+      for (let i=0;i<N;i++){
+        if (v.delay > 0){ v.delay--; continue; }
+        if (v.pos >= v.len){ v.on = false; break; }
+        const p = v.phase, i0 = p | 0, fr = p - i0, i1 = (i0 + 1) & 1023;
+        const a = A[i0] + (A[i1] - A[i0]) * fr, b = B[i0] + (B[i1] - B[i0]) * fr;
+        let s = a + (b - a) * v.mix;
+        v.lp += v.lpc * (s - v.lp); s = v.lp * hann[(v.pos * k) | 0] * v.amp;
+        L[i] += s * v.panL; R[i] += s * v.panR;
+        v.phase = (p + v.inc) % 1024; v.pos++;
+      }
+    }
+    let pk = 0; for (let i=0;i<N;i++){ const a = Math.abs(L[i]) + Math.abs(R[i]); if (a > pk) pk = a; }
+    if (pk > this.peak) this.peak = pk;
+    this.acc += N;
+    if (this.acc >= 4096){ this.acc = 0;
+      this.port.postMessage({active, played: this.played, peak: this.peak}); this.peak = 0; }
+    return true;
+  }
+}
+registerProcessor('org-grains', OrgGrains);`,
+    async attach(ctx, bus){
+      if (this.ctx === ctx) return;
+      this.ctx = ctx;
+      const url = URL.createObjectURL(new Blob([this.WORKLET], {type: 'application/javascript'}));
+      await ctx.audioWorklet.addModule(url);
+      if (this.ctx !== ctx) return;
+      this.node = new AudioWorkletNode(ctx, 'org-grains', {numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2]});
+      this.node.port.onmessage = e => { this.stats = e.data; };
+      this.node.connect(bus);
+      this.ready = true;
+      this.tables.clear();
+    },
+    // --- ключ организма ---------------------------------------------------
+    // Компактный организм — по устойчивому id (переживает кадры). Огромная
+    // связная область (ковёр травы, поле волн) — не один голос на весь мир,
+    // а плитка 8×8 столбцов: у соседних лугов разные голоса, и в железе это
+    // бесплатно (старшие биты координат), в отличие от связности.
+    key(sp, x, y, org, big){
+      if (org > 0 && !big.has(org)) return 'c' + org;
+      return 't' + sp + '_' + (x >> 3) + '_' + (y >> 3);
+    },
+    strHash(s){ let h = 2166136261 >>> 0; for (let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } return h; },
+    // --- таблицы организма ------------------------------------------------
+    // Две таблицы по 1024 отсчёта: A — «начало сэмпла», B — «конец». Из
+    // генома вида (та же проекция, что у гранул v1 и нот) и из состояния
+    // организма: возраст темнит спектр, размер даёт формантный сдвиг. Всё
+    // детерминировано ключом: тот же организм в том же состоянии — та же
+    // таблица (а значит, узнаваемый голос и проверяемый тест).
+    bucket(st){ return (Math.floor(Math.log2(Math.max(1, st.size))) ) + ':' + Math.floor(Math.min(400, st.age) / 60); },
+    buildTables(key, sp, st){
+      const T = Audio.grainTimbre(sp) || {tilt: 1.2, odd: 0.5, nz: 0.1, fPos: 3, fAmt: 1, morph: 0.5};
+      const h = this.strHash(key);
+      const ageF = Math.min(1, Math.max(0, (st.age || 0) / 300));
+      const sizeF = Math.min(1, Math.log2(Math.max(1, st.size || 1)) / 8);
+      const NH = 12, N = 1024;
+      const mk = (tilt, fp, grit) => {
+        const out = new Float32Array(N);
+        let sum2 = 0;
+        for (let k=1;k<=NH;k++){
+          let a = Math.pow(k, -tilt);
+          if (k % 2 === 0) a *= T.odd;
+          a *= 1 + T.fAmt * Math.exp(-Math.pow((k - fp) / 1.3, 2));
+          const ph = ((h >>> (k % 24)) & 255) / 255 * 2 * Math.PI;
+          for (let i=0;i<N;i++) out[i] += a * Math.sin(2 * Math.PI * k * i / N + ph);
+        }
+        // «зерно» тембра: детерминированный шумок на периоде — придыхание,
+        // но периодичное, а не белый шум (белый шум и был шипением v0.8)
+        let seed = (h ^ 0x9e3779b9) >>> 0;
+        for (let i=0;i<N;i++){ seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; out[i] += grit * ((seed / 4294967296) * 2 - 1); }
+        for (let i=0;i<N;i++) sum2 += out[i] * out[i];
+        const g = 0.25 / (Math.sqrt(sum2 / N) || 1);
+        for (let i=0;i<N;i++) out[i] *= g;
+        return out;
+      };
+      const tiltA = T.tilt * (1 - 0.35 * T.morph) + 1.4 * ageF;
+      const tiltB = T.tilt * (1 + 0.9 * T.morph) + 1.4 * ageF;
+      const fpA = T.fPos * (1 + 0.6 * sizeF), fpB = T.fPos * (1 + 0.6 * sizeF) * (1 + 0.5 * T.morph);
+      const grit = Math.min(0.12, T.nz * 0.2);
+      return {a: mk(tiltA, fpA, grit * 0.5), b: mk(tiltB, fpB, grit)};
+    },
+    ensure(key, sp, st, gen){
+      const b = this.bucket(st);
+      const have = this.tables.get(key);
+      if (have && have.bucket === b){ have.seen = gen; return; }
+      if (!this.node) return;
+      const t = this.buildTables(key, sp, st);
+      this.node.port.postMessage({t: 'table', key, a: t.a, b: t.b}, [t.a.buffer, t.b.buffer]);
+      this.tables.set(key, {sp, bucket: b, seen: gen});
+    },
+    // --- высота организма -------------------------------------------------
+    // ступень лада по хешу ключа (луга не поют в унисон), октава по размеру
+    // (крупный ниже), четверть тона по x центра (ширина стерео-поля),
+    // потом общий квантайзер тональности
+    hz(key, st){
+      const h = this.strHash(key);
+      const deg = Audio.PENTA[h % Audio.PENTA.length] % 12;
+      const oct = 2 - Math.min(3, Math.floor(Math.log2(Math.max(1, st.size || 1)) / 2));
+      const n = Math.max(S.n, 1);
+      const f = Audio.baseHz * Math.pow(2, oct + deg / 12 + ((st.cx || 0) / n - 0.5) * 0.08 + Audio.speciesDetune(st.sp) / 1200);
+      return Audio.quantHz(f);
+    },
+    grain(key, st, o){
+      if (!this.node) return;
+      const n = Math.max(S.n, 1);
+      this.node.port.postMessage({t: 'grain', key, hz: this.hz(key, st) * (o.hzMul || 1),
+        dur: o.dur, amp: o.amp, pan: 2 * (o.x != null ? o.x : st.cx) / n - 1,
+        pos: (o.y != null ? o.y : st.cy) / n, bright: o.bright, delay: o.delay || 0,
+        ph: ((this.strHash(key + ':' + (o.seq || 0)) & 1023) / 1024)});
+      this.sent++;
+    },
+    // --- кадр ----------------------------------------------------------------
+    // Собрать организмы кадра: компактные — из разметки (S.comps), ковры —
+    // плитками по живым клеткам. Возвращает Map key -> состояние.
+    organisms(){
+      const orgs = new Map(), big = new Set();
+      const n = Math.max(S.n, 1);
+      for (const c of (S.comps || [])){
+        const [cid, sp, size, cx, cy, cz, z0, z1, born] = c;
+        if (size > this.BIG){ big.add(cid); continue; }
+        orgs.set('c' + cid, {sp, size, cx, cy, cz, age: S.gen - born});
+      }
+      const k = Math.min(S.k || 0, S.species ? S.species.length : 0, S.coords ? (S.coords.length / 3) | 0 : 0);
+      const stride = Math.max(1, Math.floor(k / 60000));
+      const labels = (S.hasLabels && S.labels && S.labels.length >= k) ? S.labels : null;
+      for (let i=0;i<k;i+=stride){
+        const org = labels ? labels[i] : 0;
+        if (org > 0 && !big.has(org)) continue;          // уже учтён как компактный
+        const sp = S.species[i]; if (!sp) continue;
+        const x = S.coords[i*3], y = S.coords[i*3+1], z = S.coords[i*3+2];
+        const key = 't' + sp + '_' + (x >> 3) + '_' + (y >> 3);
+        let o = orgs.get(key);
+        if (!o){ o = {sp, size: 0, cx: 0, cy: 0, cz: 0, age: 0, _t: true}; orgs.set(key, o);
+          if (!this.tileBorn.has(key)) this.tileBorn.set(key, S.gen); }
+        o.size += stride; o.cx += x * stride; o.cy += y * stride; o.cz += z * stride;
+      }
+      for (const [key, o] of orgs) if (o._t){ o.cx /= o.size; o.cy /= o.size; o.cz /= o.size; o.age = S.gen - this.tileBorn.get(key); }
+      this._big = big;
+      return orgs;
+    },
+    onFrame(){
+      if (!this.on || !this.ready || !Audio.on || !Audio.ctx) return;
+      const now = Audio.ctx.currentTime;
+      const dt = Math.min(0.5, Math.max(0.02, this.lastFrameT ? now - this.lastFrameT : 0.1));
+      this.lastFrameT = now; this.frame++;
+      const orgs = this.organisms();
+      const gen = S.gen;
+      // дыхание: у каждого организма — длинное тихое зерно раз в несколько
+      // кадров (какие именно кадры — по хешу ключа, чтобы не хором)
+      const total = Math.max(1, orgs.size);
+      const per = Math.max(1, Math.round(6 / Math.max(0.05, this.breath)));
+      let seq = 0;
+      for (const [key, st] of orgs){
+        this.ensure(key, st.sp, st, gen);
+        if ((this.strHash(key) + this.frame) % per !== 0) continue;
+        const amp = Math.min(0.5, 0.9 * Math.sqrt(st.size) / Math.sqrt(total) / Math.sqrt(per > 3 ? 1 : 3)) * Math.min(1, this.breath + 0.2);
+        this.grain(key, st, {dur: 0.25 + 0.35 * ((this.strHash(key) >>> 8) % 100) / 100, amp, bright: 0.45,
+                             delay: dt * (seq++ % 7) / 7, seq: this.frame});
+      }
+      this.onEvents(S.events, S.eventOrgs, S.eventGens, orgs, dt);
+      // забыть таблицы организмов, которых давно нет
+      if (this.frame % 50 === 0){
+        const dead = [];
+        for (const [key, t] of this.tables) if (gen - t.seen > 200) dead.push(key);
+        if (dead.length){ for (const k of dead) this.tables.delete(k); this.node.port.postMessage({t: 'forget', keys: dead}); }
+      }
+    },
+    // события кадра -> зёрна. Типы: 1 рождение, 2 гибель, 3 смена вида;
+    // рождение подвижного вида — это шаг зверя (см. S.mobile)
+    KIND: {
+      birth: {dur: 0.035, amp: 0.55, bright: 1.0, hzMul: 1},
+      death: {dur: 0.12, amp: 0.45, bright: 0.3, hzMul: 0.5},
+      change: {dur: 0.05, amp: 0.5, bright: 0.7, hzMul: 1},
+      step: {dur: 0.015, amp: 0.4, bright: 0.9, hzMul: 2},
+    },
+    onEvents(ev, orgIds, gens, orgs, dt){
+      if (!ev || !ev.length || !this.node) return 0;
+      orgs = orgs || this.organisms();
+      const k = ev.length / 5 | 0;
+      const stride = Math.max(1, Math.ceil(k / this.MAX_EVENTS));
+      const mobile = new Set(S.mobile || []);
+      const big = this._big || new Set();
+      let made = 0;
+      for (let i=0;i<k;i+=stride){
+        const type = ev[i*5], x = ev[i*5+1], y = ev[i*5+2], z = ev[i*5+3], sp = ev[i*5+4];
+        const org = orgIds ? orgIds[i] : 0;
+        const key = this.key(sp, x, y, org, big);
+        let st = orgs.get(key);
+        if (!st){ st = {sp, size: 1, cx: x, cy: y, cz: z, age: 0}; }
+        this.ensure(key, sp, st, S.gen);
+        const kind = mobile.has(sp) && type !== 2 ? 'step' : (type === 1 ? 'birth' : type === 2 ? 'death' : 'change');
+        const K = this.KIND[kind];
+        this.grain(key, st, {dur: K.dur, amp: K.amp * this.evGain, bright: K.bright, hzMul: K.hzMul,
+                             x, y, delay: dt * (made / Math.max(1, Math.ceil(k / stride))), seq: i});
+        made++;
+      }
+      return made;
+    },
+    set(on){
+      this.on = !!on;
+      if (this.on && Audio.ctx && Audio.busO) this.attach(Audio.ctx, Audio.busO);
+      if (!this.on && this.node) this.node.port.postMessage({t: 'reset'}), this.tables.clear();
+    },
+  },
   // ноты: ADSR-секвенсор (своя шина, кэш волновых форм, счётчик нот)
   noteOn: false, noteWaves: new Map(), notesPlayed: 0, busNo: null, sendNo: null,
   // Вокодер «вид сверху»: строка проекции = частотная полоса, в полосе сумма
@@ -1071,6 +1367,12 @@ const Audio = {
     this.sendG = ctx.createGain(); this.sendG.gain.value = 0;
     this.busG.connect(this.sendG); this.sendG.connect(this.reverb);
     this.hannCurve = this.hann(64);
+    // организмы: своя шина, посыл в реверб, worklet подключается по включению
+    this.busO = ctx.createGain(); this.busO.gain.value = +$('mixO').value;
+    this.busO.connect(this.master);
+    this.sendO = ctx.createGain(); this.sendO.gain.value = 0.25;
+    this.busO.connect(this.sendO); this.sendO.connect(this.reverb);
+    if (this.Org.on) this.Org.attach(ctx, this.busO);
     // ноты: своя шина, свой посыл в реверб и общий буфер шума для придыхания
     this.busNo = ctx.createGain(); this.busNo.gain.value = +$('mixNo').value;
     this.busNo.connect(this.master);
@@ -1961,6 +2263,10 @@ $('vocOn').onchange = e=>{ Audio.setVocoder(e.target.checked); $('vocHint').styl
 $('vocBands').oninput = e=>{ Audio.vocBands=+e.target.value; $('vocBandsLbl').textContent=e.target.value; };
 $('mixVo').oninput = e=>{ if (Audio.busVo) Audio.busVo.gain.value=+e.target.value; };
 $('grainOn').onchange = e=>{ Audio.init(); Audio.setGrain(e.target.checked); };
+$('orgOn').onchange = e=>{ Audio.init(); Audio.Org.set(e.target.checked); };
+$('orgBreath').oninput = e=>{ Audio.Org.breath = +e.target.value; $('orgBreathLbl').textContent = (+e.target.value).toFixed(2); };
+$('orgEv').oninput = e=>{ Audio.Org.evGain = +e.target.value; $('orgEvLbl').textContent = (+e.target.value).toFixed(2); };
+$('mixO').oninput = e=>{ if(Audio.busO) Audio.busO.gain.value=+e.target.value; };
 $('grainRate').oninput = e=>{ $('grainRateLbl').textContent = e.target.value; };
 $('grainMs').oninput = e=>{ $('grainMsLbl').textContent = e.target.value; };
 $('mixNo').oninput = e=>{ if(Audio.busNo) Audio.busNo.gain.value=+e.target.value; };

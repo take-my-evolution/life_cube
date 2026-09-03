@@ -21,6 +21,11 @@ class Engine:
     # выше этого числа клеток разметка организмов (scipy.label на CPU) стоит
     # секунды и душит и симуляцию, и веб-сервер: отключаем её автоматически
     COMPONENTS_CELL_LIMIT = 6_000_000
+    # События (рождения/гибели/смены вида) считаются дифом species между
+    # поколениями. Выше этого числа клеток диф дороже самого шага — выключаем
+    EVENTS_CELL_LIMIT = 4_000_000
+    EVENTS_PER_STEP = 4096          # больше за поколение не берём (прореживаем)
+    EVENTS_KEEP = 16384             # столько копим между кадрами
     HIST_KEEP = 600          # сколько последних поколений держим поштучно
     HIST_LONG = 400          # столько точек прореженной длинной истории
     HIST_EVERY = 50          # каждое k-е поколение попадает в длинную историю
@@ -59,6 +64,13 @@ class Engine:
         self._snap_pending = 0              # сколько потоков ждут снимка
         self.reseeds = 0                    # сколько раз мир подсевали
         self.last_reseed_gen = None
+        # поток событий: что изменилось в мире с прошлого кадра. Это то, из
+        # чего звук делает зёрна, и то, что потом пойдёт по проводу между
+        # модулями «Куб» и «Голос» (см. docs/iron-plan)
+        self.events_on = self.cfg.n ** 3 <= self.EVENTS_CELL_LIMIT
+        self._prev_species = None
+        self._events = []
+        self._events_gens = 0
         self.publish(force=True)
 
     # --- управление ---------------------------------------------------------
@@ -142,18 +154,69 @@ class Engine:
             self.reseeds = 0
             self.last_reseed_gen = None
             self.tracker = Tracker() if self.components else None
+            self.events_on = self.cfg.n ** 3 <= self.EVENTS_CELL_LIMIT
+            self._prev_species = None
+            self._events = []
+            self._events_gens = 0
         self.publish(force=True)
 
     # --- шаг ----------------------------------------------------------------
     def advance(self):
         with self._lock:
+            if self.events_on and self._prev_species is None:
+                self._prev_species = self.state["species"].copy()
             pops = self.rules.step(self.state, self.cfg, self.xp, self.correlate, self.gen)
             self.gen += 1
+            if self.events_on:
+                self._collect_events()
             self.hist.append(pops)
             if self.gen % self.HIST_EVERY == 0:
                 self.hist_long.append(pops)
         self.maybe_reseed(pops)
         return pops
+
+    # --- события ------------------------------------------------------------
+    EV_BIRTH, EV_DEATH, EV_CHANGE = 1, 2, 3
+
+    def _collect_events(self):
+        """Диф species между поколениями -> список (тип, x, y, z, вид).
+        Зовётся под замком. На GPU это одно сравнение и один nonzero."""
+        xp = self.xp
+        cur = self.state["species"]
+        prev = self._prev_species
+        if prev is None or prev.shape != cur.shape:
+            self._prev_species = cur.copy()
+            return
+        idx = xp.flatnonzero(prev != cur)
+        self._prev_species = cur.copy()
+        self._events_gens += 1
+        k = int(idx.shape[0])
+        if k == 0:
+            return
+        if k > self.EVENTS_PER_STEP:
+            idx = idx[:: k // self.EVENTS_PER_STEP + 1]
+        p = to_cpu(prev.ravel()[idx]).astype(np.int32)
+        c = to_cpu(cur.ravel()[idx]).astype(np.int32)
+        idx = to_cpu(idx)
+        x, y, z = np.unravel_index(idx, cur.shape)
+        typ = np.where(p == 0, self.EV_BIRTH, np.where(c == 0, self.EV_DEATH, self.EV_CHANGE))
+        sp = np.where(c > 0, c, p)
+        ev = np.stack([typ, x, y, z, sp], axis=1).astype(np.uint16)
+        self._events.append(ev)
+        total = sum(len(e) for e in self._events)
+        while total > self.EVENTS_KEEP and len(self._events) > 1:
+            total -= len(self._events.pop(0))
+
+    def _drain_events(self):
+        """Забрать накопленные события (под замком). -> (uint16 (k,5), поколений)."""
+        if self._events:
+            ev = np.concatenate(self._events)
+        else:
+            ev = np.zeros((0, 5), np.uint16)
+        gens = self._events_gens
+        self._events = []
+        self._events_gens = 0
+        return ev, gens
 
     # --- повторный засев ----------------------------------------------------
     def maybe_reseed(self, pops):
@@ -209,6 +272,7 @@ class Engine:
                        "soil": (np.zeros((1, 1, 1), bool) if heightmaps
                                 else to_cpu(self.state["soil"]).copy())}
                 n_species = self.rules.n_species(self.cfg)
+                events, event_gens = self._drain_events()
         finally:
             self._snap_pending -= 1
         want = self.components if components is None else (components and self.components)
@@ -276,6 +340,20 @@ class Engine:
             snap.soil_coords = None
             self.relief = snap.stone_h
         snap.relief = self.relief
+        # события с прошлого кадра + номер организма по последней разметке
+        # (0 — ещё неизвестно чей: новорождённый рост до следующей разметки)
+        snap.events = events
+        snap.event_gens = event_gens
+        ids_map = self.tracker.prev if self.tracker is not None else None
+        if ids_map is not None and len(events) and ids_map.shape == cpu["species"].shape:
+            e = events.astype(np.intp)
+            snap.event_orgs = ids_map[e[:, 1], e[:, 2], e[:, 3]].astype(np.uint32)
+        else:
+            snap.event_orgs = np.zeros(len(events), np.uint32)
+        try:
+            snap.mobile = list(self.rules.mobile_species(self.cfg))
+        except Exception:
+            snap.mobile = []
         # биомасса: клетка мха и клетка дерева — разные вещи, поэтому кроме
         # числа клеток считаем и массу. species_mass() у движка без гена массы
         # вернёт единицы, и биомасса совпадёт с населением

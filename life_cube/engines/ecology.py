@@ -125,6 +125,10 @@ class EcologyRules(Rules):
         state["last_reseed"] = gen
         return int(len(xs))
 
+    def mobile_species(self, cfg):
+        mobile = cfg.mobile_mask()
+        return [i + 1 for i in range(cfg.n_species) if i < len(mobile) and mobile[i]]
+
     def species_names(self, cfg):
         return list(C.SPECIES_NAMES)[: cfg.n_species]
 

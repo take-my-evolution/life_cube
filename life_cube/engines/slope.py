@@ -1139,6 +1139,10 @@ class SlopeRules(Rules):
         g = np.asarray(cfg.genomes)
         return [float(v) if v > 0 else 1.0 for v in g[:, IDX["mass"]]]
 
+    def mobile_species(self, cfg):
+        g = np.asarray(cfg.genomes)
+        return [i + 1 for i in range(len(g)) if g[i, IDX["speed"]] > 0]
+
     def world_params(self):
         return self.WORLD_PARAMS
 

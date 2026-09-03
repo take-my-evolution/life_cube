@@ -7,6 +7,8 @@ life_cube/
     ecology.py        обёртка над config/world/fields/step/motion
     lichen.py         самостоятельный движок (свой Config, мир, шаг, гены)
     terra.py          горы, реки, почва, бактерии и растения
+    slope.py          склон: мох точит камень, почва съезжает, лес в низинах
+    iron.py           «железо»: целочисленный автомат под ПЛИС (жизнь 3D / экология / волны)
   config.py world.py fields.py step.py motion.py   — модель «экология»
   engine.py           оркестровка: цикл, пауза/шаг/скорость, снимки, смена движка
   snapshot.py         разреженный снимок, организмы (компоненты), устойчивые id
@@ -31,6 +33,7 @@ legacy/               исходный монолит cube_ecology.py (этал�
 | `gene_docs()` | `{ген: описание}` для карточек лаборатории генома |
 | `seed(state, cfg, xp, rng, count, gen)` | подсадить жизнь (повторный засев); флаг `can_seed` |
 | `fork_species(cfg, state, sid, genome, xp, gen, share)` | ответвить потомка от живущего вида; флаг `can_fork` |
+| `mobile_species(cfg)` | какие виды ходят: для звука шаг зверя ≠ рождение клетки |
 | флаги `dynamic_species`, `terrain_changes` | слать имена видов и рельеф каждый кадр |
 
 Всё остальное — общее: `Engine` крутит любой движок, `snapshot.py` видит только
@@ -39,6 +42,7 @@ legacy/               исходный монолит cube_ecology.py (этал�
 ## Поток данных
 ```
 Rules.step ──► state ──► Engine.publish ──► Snapshot ──┬─► viewers/web (WebSocket, WebGL2)
+              └─ диф species ─► события (тип, x, y, z, вид, организм) ─┘  → звук «Организмы» (AudioWorklet)
                                                        ├─► viewers/matplotlib
                                                        └─► sound.features ──► SoundFrame ──► Web Audio / synth.wav
 ```

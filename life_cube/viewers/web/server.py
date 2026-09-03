@@ -6,8 +6,11 @@
       species  uint8  [k]
       labels   uint32 [k]
       soil     uint16 [m,3]
-    В header: gen, n, k, m, pops, rate, measured_rate, paused, components,
-    hist_tail (последние 400 значений), relief (только в первом кадре).
+      карты высот uint16 [n,n] (если header.maps.<key>)
+      events   uint16 [e,5]   (тип, x, y, z, вид) — что изменилось с прошлого кадра
+      orgs     uint32 [e]     номер организма на событие (0 — неизвестен)
+    В header: gen, n, k, m, e, e_gens, pops, rate, measured_rate, paused, components,
+    mobile (виды, которые ходят), hist_tail, relief (только в первом кадре).
 
 Клиент шлёт JSON-команды: {"cmd": "pause"|"resume"|"step"|"rate", "value": ..}
                           {"cmd": "reset", "seed_world":..,"seed_mut":..}
@@ -59,6 +62,9 @@ def encode_snapshot(snap: Snapshot, first=False, sound=None, sent=None) -> bytes
         "hist_tail": [list(map(int, h)) for h in getattr(snap, "hist", [])],
         # метки организмов не шлём, когда их не считают: это 4 байта на клетку
         "labels": bool(snap.components) and len(snap.labels) == len(snap.coords),
+        "e": int(len(snap.events)) if getattr(snap, "events", None) is not None else 0,
+        "e_gens": int(getattr(snap, "event_gens", 0) or 0),
+        "mobile": list(getattr(snap, "mobile", None) or []),
     }
     sent = sent if sent is not None else {}
     names = list(getattr(snap, "species_names", []))[:len(snap.pops)]
@@ -103,6 +109,12 @@ def encode_snapshot(snap: Snapshot, first=False, sound=None, sent=None) -> bytes
         a = getattr(snap, key, None)
         if a is not None and header.get("maps", {}).get(key):
             parts.append(np.ascontiguousarray(a, dtype=np.uint16).tobytes())
+    if header["e"]:
+        parts.append(np.ascontiguousarray(snap.events, dtype=np.uint16).tobytes())
+        orgs = getattr(snap, "event_orgs", None)
+        if orgs is None or len(orgs) != header["e"]:
+            orgs = np.zeros(header["e"], np.uint32)
+        parts.append(np.ascontiguousarray(orgs, dtype=np.uint32).tobytes())
     return b"".join(parts)
 
 
@@ -123,6 +135,12 @@ def decode_snapshot(buf: bytes):
     for key in ("stone_h", "soil_h", "water_h"):
         if header.get("maps", {}).get(key):
             header[key] = np.frombuffer(buf, np.uint16, n * n, off).reshape(n, n); off += n * n * 2
+    e = header.get("e", 0)
+    if e:
+        header["events"] = np.frombuffer(buf, np.uint16, e * 5, off).reshape(e, 5); off += e * 10
+        header["event_orgs"] = np.frombuffer(buf, np.uint32, e, off); off += e * 4
+    else:
+        header["events"] = np.zeros((0, 5), np.uint16); header["event_orgs"] = np.zeros(0, np.uint32)
     return header, coords, species, labels, soil
 
 
